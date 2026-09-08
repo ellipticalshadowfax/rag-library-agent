@@ -1,0 +1,23 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+
+# Runtime data (never commit)
+index/
+manifest.db
+*.db
+ingest.log
+server.log
+scan_results.json
+.ingest.lock
+cache/
+ocr/
+
+# Local / machine-specific
+config.local.json
+
+# Editors
+.vscode/
+.idea/
+.DS_Store

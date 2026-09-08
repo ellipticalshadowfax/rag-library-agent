@@ -1,0 +1,29 @@
+{
+  "embed_model": "intfloat/multilingual-e5-small",
+  "embed_device": "cpu",
+  "embed_dim": 384,
+  "chunk_tokens": 330,
+  "chunk_overlap": 60,
+  "llm_base_url": "http://localhost:1234/v1",
+  "llm_model": "gemma-4-e2b-it",
+  "llm_temperature": 0.3,
+  "llm_max_tokens": 4096,
+  "retrieval_top_k": 10,
+  "fiction_tags": [
+    "Fiction",
+    "Short Stories",
+    "Literary"
+  ],
+  "ocr_enabled": false,
+  "ocr_backend": "rapidocr",
+  "ocr_char_threshold": 50,
+  "ocr_languages": [
+    "en"
+  ],
+  "sets": {
+    "library": {
+      "path": "/path/to/your/library",
+      "kind": "local"
+    }
+  }
+}

@@ -1,0 +1,625 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RAG Library Agent</title>
+<style>
+  :root {
+    --bg: #0f1117; --panel: #171a21; --panel2: #1e2230; --border: #2a2f3e;
+    --text: #e8eaf0; --muted: #8a91a3; --accent: #6c8cff; --accent2: #4fd1c5;
+    --ok: #3ddc84; --warn: #f6c453; --err: #f76c6c; --fiction: #ff7ac3;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; min-height: 100vh; }
+  header { display: flex; align-items: center; gap: 16px; padding: 14px 22px; border-bottom: 1px solid var(--border); background: var(--panel); }
+  header h1 { font-size: 17px; font-weight: 600; letter-spacing: .3px; }
+  .status-pill { font-size: 12px; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); white-space: nowrap; }
+  .status-pill.ok { color: var(--ok); border-color: var(--ok); }
+  .status-pill.err { color: var(--err); border-color: var(--err); }
+  .status-pill.warn { color: var(--warn); border-color: var(--warn); }
+  .status-pill.actionable { cursor: pointer; }
+  .pulse { animation: pulse 1.6s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: .45; } }
+  nav { display: flex; gap: 6px; padding: 10px 22px; border-bottom: 1px solid var(--border); background: var(--panel); }
+  nav button { background: transparent; border: 1px solid var(--border); color: var(--muted); padding: 8px 18px; border-radius: 8px; cursor: pointer; font-size: 13px; transition: .15s; }
+  nav button:hover { color: var(--text); border-color: var(--accent); }
+  nav button.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+  main { padding: 22px; max-width: 1100px; margin: 0 auto; }
+  .tab { display: none; }
+  .tab.active { display: block; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 18px; margin-bottom: 18px; }
+  .panel h3 { font-size: 14px; color: var(--muted); text-transform: uppercase; letter-spacing: .6px; margin-bottom: 14px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 18px; }
+  label { display: block; font-size: 12.5px; color: var(--muted); margin: 10px 0 4px; }
+  input[type=text], input[type=number], select {
+    width: 100%; background: var(--panel2); border: 1px solid var(--border); color: var(--text);
+    padding: 9px 11px; border-radius: 8px; font-size: 13.5px; outline: none;
+  }
+  input:focus, select:focus { border-color: var(--accent); }
+  .btn { background: var(--accent); border: none; color: #fff; padding: 10px 20px; border-radius: 8px; font-size: 13.5px; cursor: pointer; font-weight: 600; transition: .15s; }
+  .btn:hover { filter: brightness(1.12); }
+  .btn.secondary { background: var(--panel2); border: 1px solid var(--border); color: var(--text); font-weight: 500; }
+  .btn.danger { background: var(--err); }
+  .btn:disabled { opacity: .5; cursor: not-allowed; }
+  .btn-row { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
+  .dir-row { display: flex; gap: 8px; }
+  .dir-row input { flex: 1; }
+  .stat-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .stat-card { background: var(--panel2); border: 1px solid var(--border); border-radius: 10px; padding: 14px; text-align: center; }
+  .stat-card .num { font-size: 26px; font-weight: 700; }
+  .stat-card .lbl { font-size: 11.5px; color: var(--muted); margin-top: 4px; text-transform: uppercase; letter-spacing: .5px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-size: 11.5px; text-transform: uppercase; letter-spacing: .4px; }
+  .tag { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; border: 1px solid var(--border); color: var(--muted); }
+  .tag.fiction { color: var(--fiction); border-color: var(--fiction); }
+  .tag.nonfiction { color: var(--ok); border-color: var(--ok); }
+  .tag.ocr { color: var(--warn); border-color: var(--warn); }
+  .muted { color: var(--muted); }
+  .small { font-size: 12px; }
+  .progress-wrap { height: 8px; background: var(--panel2); border-radius: 999px; overflow: hidden; border: 1px solid var(--border); }
+  .progress-bar { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent2)); width: 0%; transition: width .4s; }
+  .log-box { background: #0b0d12; border: 1px solid var(--border); border-radius: 8px; padding: 10px; font-family: ui-monospace, monospace; font-size: 11.5px; max-height: 260px; overflow: auto; white-space: pre-wrap; color: #9fd3c7; }
+  .chat { display: flex; flex-direction: column; gap: 12px; }
+  .chat-msg { padding: 12px 14px; border-radius: 10px; background: var(--panel2); border: 1px solid var(--border); font-size: 14px; line-height: 1.55; }
+  .chat-msg.user { border-color: var(--accent); }
+  .chat-msg .who { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 6px; }
+  .source { margin-top: 10px; padding: 10px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; font-size: 12.5px; }
+  .source .title { font-weight: 600; }
+  .fiction-banner { background: rgba(255,122,195,.08); border: 1px solid var(--fiction); color: var(--fiction); padding: 10px 14px; border-radius: 8px; font-size: 13px; }
+  #chatBlocked { display: none; margin: 12px 0 0; padding: 10px 14px; border-radius: 8px; font-size: 13px; color: var(--warn); border: 1px solid var(--warn); background: rgba(246,196,83,.06); }
+  #chatBlocked.show { display: block; }
+  .hidden { display: none !important; }
+  .spinner { display: inline-block; width: 13px; height: 13px; border: 2px solid rgba(255,255,255,.3); border-top-color: #fff; border-radius: 50%; animation: spin .7s linear infinite; vertical-align: -2px; margin-right: 6px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #toast { position: fixed; bottom: 20px; right: 20px; background: var(--panel2); border: 1px solid var(--border); padding: 12px 18px; border-radius: 10px; font-size: 13px; display: none; max-width: 360px; z-index: 50; }
+  #toast.show { display: block; animation: fadein .25s; }
+  @keyframes fadein { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; } }
+
+  /* ── Folder picker dialog ── */
+  .modal-overlay { position: fixed; inset: 0; background: rgba(8,10,16,.62); display: flex; align-items: center; justify-content: center; z-index: 100; }
+  .modal { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; width: min(640px, 94vw); max-height: 80vh; display: flex; flex-direction: column; overflow: hidden; }
+  .modal h3 { padding: 14px 18px; border-bottom: 1px solid var(--border); font-size: 14px; }
+  .modal-body { padding: 12px 18px; flex: 1; overflow: auto; }
+  .modal-footer { padding: 12px 18px; border-top: 1px solid var(--border); display: flex; gap: 8px; justify-content: flex-end; align-items: center; }
+  .pathbar { display: flex; gap: 8px; align-items: center; margin: 8px 0; }
+  .pathbar input { flex: 1; }
+  .chip { font-size: 11px; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); cursor: pointer; user-select: none; }
+  .chip:hover { color: var(--text); border-color: var(--accent); }
+  #fsList { margin-top: 8px; border: 1px solid var(--border); border-radius: 8px; overflow: auto; max-height: 300px; }
+  .fs-row { display: flex; gap: 8px; align-items: center; padding: 7px 10px; font-size: 13.5px; border-bottom: 1px solid var(--border); cursor: pointer; }
+  .fs-row:last-child { border-bottom: none; }
+  .fs-row:hover { background: var(--panel2); }
+  .fs-row.active { background: var(--panel2); box-shadow: inset 2px 0 0 var(--accent); }
+  .fs-row .ico { width: 20px; text-align: center; color: var(--warn); }
+  .fs-row.dim .ico { color: var(--muted); }
+  .fs-row .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .fs-row .btn { padding: 4px 12px; font-size: 12px; font-weight: 500; }
+</style>
+</head>
+<body>
+<header>
+  <h1>&#128218; RAG Library Agent</h1>
+  <span class="status-pill warn hidden actionable pulse" id="activityPill" title="Go to Ingest tab"></span>
+  <span class="status-pill" id="llmPill">LLM: checking&hellip;</span>
+  <span class="status-pill" id="healthPill">server: ok</span>
+  <span style="flex:1"></span>
+  <span class="small muted" id="curveInfo"></span>
+</header>
+<nav>
+  <button class="active" data-tab="tab-setup">Setup</button>
+  <button data-tab="tab-scan">Scan</button>
+  <button data-tab="tab-ingest">Ingest</button>
+  <button data-tab="tab-chat">Chat</button>
+</nav>
+<main>
+
+  <!-- ═══ SETUP ═══ -->
+  <section class="tab active" id="tab-setup">
+    <div class="panel">
+      <h3>Document source</h3>
+      <label>Library / document directory</label>
+      <div class="dir-row">
+        <input type="text" id="setTarget" placeholder="/path/to/your/library">
+        <button class="btn secondary" id="btnBrowseSet">Browse&hellip;</button>
+      </div>
+    </div>
+    <div class="panel">
+      <h3>Model settings</h3>
+      <div class="grid">
+        <div>
+          <label>Embedding model (any Sentence-Transformers)</label>
+          <input type="text" id="cfgEmbedModel">
+        </div>
+        <div>
+          <label>LLM base URL (LM Studio)</label>
+          <input type="text" id="cfgLlmUrl">
+        </div>
+        <div>
+          <label>LLM model id</label>
+          <input type="text" id="cfgLlmModel" placeholder="default">
+        </div>
+        <div>
+          <label>Chunk tokens</label>
+          <input type="number" id="cfgChunkTokens" min="64" max="2000">
+        </div>
+        <div>
+          <label>Chunk overlap</label>
+          <input type="number" id="cfgChunkOverlap" min="0" max="500">
+        </div>
+        <div>
+          <label>Retrieval top-k</label>
+          <input type="number" id="cfgTopK" min="1" max="50">
+        </div>
+        <div>
+          <label>OCR enabled (.pdf scanned files)</label>
+          <select id="cfgOcr"><option value="false">No (skip scanned PDFs)</option><option value="true">Yes (slower)</option></select>
+        </div>
+      </div>
+      <div class="btn-row">
+        <button class="btn" id="btnSaveConfig">Save config</button>
+        <button class="btn secondary" id="btnCheckLlm">Check LM Studio</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ SCAN ═══ -->
+  <section class="tab" id="tab-scan">
+    <div class="panel">
+      <h3>Scan library (dry run &mdash; nothing is indexed)</h3>
+      <label>Directory to scan</label>
+      <div class="dir-row">
+        <input type="text" id="scanTarget" placeholder="/path/to/your/library">
+        <button class="btn secondary" id="btnBrowseScan">Browse&hellip;</button>
+      </div>
+      <div class="btn-row">
+        <button class="btn" id="btnScan">Run scan</button>
+        <span class="muted small" id="scanInfo"></span>
+      </div>
+    </div>
+    <div id="scanResults" class="hidden">
+      <div class="stat-cards">
+        <div class="stat-card"><div class="num" id="sTot">0</div><div class="lbl">Files</div></div>
+        <div class="stat-card"><div class="num" id="sFic">0</div><div class="lbl">Fiction</div></div>
+        <div class="stat-card"><div class="num" id="sNon">0</div><div class="lbl">Non-Fiction</div></div>
+        <div class="stat-card"><div class="num" id="sUntag">0</div><div class="lbl" style="color:var(--muted)">Untagged</div></div>
+        <div class="stat-card"><div class="num" id="sOcr">0</div><div class="lbl" style="color:var(--warn)">Need OCR</div></div>
+        <div class="stat-card"><div class="num" id="sSize">0</div><div class="lbl">Total size</div></div>
+      </div>
+      <div class="panel">
+        <h3>Files by type</h3>
+        <table><thead><tr><th>Type</th><th>Count</th><th>OCR needed</th><th>Size</th></tr></thead><tbody id="sExtBody"></tbody></table>
+      </div>
+      <div class="panel">
+        <h3>Files needing OCR</h3>
+        <div id="sOcrList" class="muted small"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ INGEST ═══ -->
+  <section class="tab" id="tab-ingest">
+    <div class="panel">
+      <h3>Build / update index</h3>
+      <div class="grid">
+        <div>
+          <label>Directory to index</label>
+          <div class="dir-row">
+            <input type="text" id="ingestTarget" placeholder="/path/to/your/library">
+            <button class="btn secondary" id="btnBrowseIngest">Browse&hellip;</button>
+          </div>
+        </div>
+        <div>
+          <label>Collection name</label>
+          <input type="text" id="ingestSet" value="library">
+        </div>
+      </div>
+      <label style="margin-top:12px"><input type="checkbox" id="ingestForce"> Force re-embed (used after changing the embedding model)</label>
+      <div class="btn-row">
+        <button class="btn" id="btnIngest">Start ingest</button>
+        <button class="btn secondary hidden" id="btnPauseIngest">Pause</button>
+        <button class="btn danger hidden" id="btnStopIngest">Stop</button>
+        <button class="btn secondary" id="btnRefreshCollections">Refresh collections</button>
+      </div>
+    </div>
+    <div class="panel hidden" id="ingestLive">
+      <h3>Job</h3>
+      <div class="small muted" id="ingestLabel">idle</div>
+      <div class="progress-wrap" style="margin:10px 0"><div class="progress-bar" id="ingestBar"></div></div>
+      <div class="small muted">processed <span id="iDone">0</span> &middot; skipped <span id="iSkip">0</span> &middot; errors <span id="iErr">0</span> &middot; <span id="iEta"></span></div>
+      <div id="ingestLog" class="log-box" style="margin-top:12px"></div>
+    </div>
+    <div class="panel">
+      <h3>Collections</h3>
+      <div id="colList" class="small muted">(refresh to list)</div>
+    </div>
+  </section>
+
+  <!-- ═══ CHAT ═══ -->
+  <section class="tab" id="tab-chat">
+    <div class="panel">
+      <h3>Ask your library</h3>
+      <div class="grid">
+        <div>
+          <label>Collection</label>
+          <select id="chatSet"></select>
+        </div>
+        <div>
+          <label>Kind filter</label>
+          <select id="chatKind">
+            <option value="">All</option>
+            <option value="nonfiction">Non-fiction only</option>
+            <option value="fiction">Fiction only</option>
+          </select>
+        </div>
+      </div>
+      <div id="chatBlocked">&#9203; <b>Indexing is running</b> &mdash; chat is paused until it finishes (or is stopped). You can pause/stop it from the <b>Ingest</b> tab.</div>
+      <div class="chat" style="margin-top:14px">
+        <div class="chat-msg user">
+          <div class="who">you</div>
+          <div contenteditable="true" id="chatInput" style="outline:none; min-height:24px" data-placeholder="Ask a question about your documents&hellip;"></div>
+        </div>
+        <div class="btn-row" style="margin-top:0">
+          <button class="btn" id="btnAsk">Ask</button>
+        </div>
+        <div id="chatOut"></div>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<!-- ── Folder picker dialog ── -->
+<div class="modal-overlay hidden" id="fsModal">
+  <div class="modal">
+    <h3>Select folder</h3>
+    <div class="modal-body">
+      <div class="pathbar">
+        <div style="flex:1"></div>
+        <span class="chip" data-d="/">/</span>
+        <span class="chip" data-d="/media">Media</span>
+        <span class="chip" data-d="/home">Home</span>
+      </div>
+      <div class="pathbar">
+        <input type="text" id="fsPath" placeholder="/media">
+        <button class="btn secondary" id="fsUp">Up</button>
+        <button class="btn secondary" id="fsGo">Go</button>
+      </div>
+      <div class="small muted" id="fsError" style="color:var(--err)"></div>
+      <div id="fsList"><span class="spinner"></span>Loading&hellip;</div>
+    </div>
+    <div class="modal-footer">
+      <span class="small muted" id="fsHint">Double-click a folder to open it. Click once to select.</span>
+      <span style="flex:1"></span>
+      <button class="btn secondary" id="fsCancel">Cancel</button>
+      <button class="btn" id="fsSelect">Select this folder</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const api = {
+  get: (p) => fetch(p).then(r => r.json()),
+  post: (p, body) => fetch(p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) }).then(r => r.json()),
+};
+
+function toast(msg, ms = 3500) {
+  const t = $('#toast'); t.textContent = msg; t.classList.add('show');
+  clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('show'), ms);
+}
+function badgeTag(s) { return (s || '').toLowerCase() === 'fiction' ? 'fiction' : 'nonfiction'; }
+function fmtSize(mb) { return mb >= 1024 ? (mb/1024).toFixed(1) + ' GB' : Math.round(mb) + ' MB'; }
+function el(tag, cls, html) { const e = document.createElement(tag); if (cls) e.className = cls; if (html != null) e.innerHTML = html; return e; }
+function escapeHtml(s) {
+  return (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ── Nav tabs ──
+function goTab(id) {
+  document.querySelectorAll('nav button').forEach(x => x.classList.toggle('active', x.dataset.tab === id));
+  document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x.id === id));
+  if (id === 'tab-ingest') { refreshCollections(); refreshIngest(); }
+  if (id === 'tab-chat') refreshChatSets();
+}
+document.querySelectorAll('nav button').forEach(b => b.onclick = () => goTab(b.dataset.tab));
+
+// ── Status ──
+async function refreshStatus() {
+  try {
+    const sys = await api.get('/api/system');
+    const pill = $('#llmPill');
+    if (sys.lmstudio.online) {
+      pill.textContent = 'LLM: online (' + (sys.lmstudio.models.length || 'default') + ')';
+      pill.className = 'status-pill ok';
+    } else {
+      pill.textContent = 'LLM: offline';
+      pill.className = 'status-pill err';
+    }
+  } catch (e) { $('#llmPill').textContent = 'LLM: ???'; }
+}
+setInterval(refreshStatus, 15000); refreshStatus();
+
+// ── Ingest activity (global) ──
+let ingestWasRunning = false;
+let ingestFinishUntil = 0;
+async function refreshIngest() {
+  let s;
+  try { s = await api.get('/api/ingest/status'); }
+  catch (e) { return; }
+
+  const pill = $('#activityPill');
+  const running = !!s.running;
+
+  // Ingest tab control buttons
+  const startBtn = $('#btnIngest');
+  const pauseBtn = $('#btnPauseIngest');
+  const stopBtn = $('#btnStopIngest');
+  startBtn.disabled = running;
+  pauseBtn.classList.toggle('hidden', !running);
+  stopBtn.classList.toggle('hidden', !running);
+  pauseBtn.textContent = s.paused ? 'Resume' : 'Pause';
+
+  // Chat blocked state
+  const askBtn = $('#btnAsk');
+  const blocked = $('#chatBlocked');
+  if (running) { askBtn.disabled = true; blocked.classList.add('show'); }
+  else { askBtn.disabled = false; blocked.classList.remove('show'); }
+
+  // Live progress panel
+  if (running) {
+    $('#ingestLive').classList.remove('hidden');
+    const pct = s.total ? Math.min(100, Math.round(100 * (s.current || 0) / s.total)) : 5;
+    $('#ingestBar').style.width = (s.paused ? Math.max(pct, 5) : pct) + '%';
+    $('#iDone').textContent = s.done || 0; $('#iSkip').textContent = s.skipped || 0; $('#iErr').textContent = s.errors || 0;
+    const suffix = s.paused ? ' (paused)' : '';
+    $('#ingestLabel').innerHTML = `<span class="spinner"></span>Indexing ${escapeHtml(s.set_name || '…')}${suffix} &mdash; file ${s.current || '…'}/${s.total || '…'}`;
+    if (s.lines && s.lines.length) {
+      $('#ingestLog').textContent = s.lines.join('');
+      $('#ingestLog').scrollTop = $('#ingestLog').scrollHeight;
+    }
+    ingestWasRunning = true;
+    pill.classList.remove('hidden'); pill.classList.add('pulse');
+    pill.textContent = (s.paused ? '⏸ Indexing paused · file ' : 'Indexing · file ')
+      + (s.current || '…') + '/' + (s.total || '…');
+    pill.className = 'status-pill warn actionable pulse';
+  } else {
+    if (ingestWasRunning) {
+      ingestWasRunning = false;
+      ingestFinishUntil = Date.now() + 12000;
+      refreshCollections(true);
+    }
+    if (Date.now() < ingestFinishUntil) {
+      pill.classList.remove('hidden'); pill.classList.remove('pulse');
+      pill.textContent = '✓ Indexing finished';
+      pill.className = 'status-pill ok actionable';
+    } else {
+      pill.classList.add('hidden');
+    }
+  }
+
+  pill.onclick = () => goTab('tab-ingest');
+}
+setInterval(refreshIngest, 2500);
+
+// ── Config load/save ──
+async function loadConfig() {
+  const c = await api.get('/api/config');
+  $('#cfgEmbedModel').value = c.embed_model || '';
+  $('#cfgLlmUrl').value = c.llm_base_url || '';
+  $('#cfgLlmModel').value = c.llm_model || '';
+  $('#cfgChunkTokens').value = c.chunk_tokens || 330;
+  $('#cfgChunkOverlap').value = c.chunk_overlap || 60;
+  $('#cfgTopK').value = c.retrieval_top_k || 10;
+  $('#cfgOcr').value = String(c.ocr_enabled || false);
+  $('#curveInfo').textContent = 'embeddings: ' + (c.embed_model || '');
+}
+loadConfig();
+
+$('#btnSaveConfig').onclick = async () => {
+  const body = {
+    embed_model: $('#cfgEmbedModel').value.trim(),
+    llm_base_url: $('#cfgLlmUrl').value.trim(),
+    llm_model: $('#cfgLlmModel').value.trim(),
+    chunk_tokens: parseInt($('#cfgChunkTokens').value) || 330,
+    chunk_overlap: parseInt($('#cfgChunkOverlap').value) || 60,
+    retrieval_top_k: parseInt($('#cfgTopK').value) || 10,
+    ocr_enabled: $('#cfgOcr').value === 'true',
+  };
+  const r = await api.post('/api/config', body);
+  toast(r.ok ? 'Config saved.' : 'Save failed.');
+  if (r.ok) loadConfig();
+};
+
+$('#btnCheckLlm').onclick = () => { toast('Checking...', 400); setTimeout(refreshStatus, 1500); };
+
+// ── Folder picker dialog ──
+let fsTargetId = null;
+let fsCurDir = '/';
+let fsParent = '/';
+let fsSelPath = null;
+
+async function loadFsDir(dir) {
+  fsCurDir = dir;
+  fsSelPath = dir;
+  fsParent = '/';
+  $('#fsPath').value = dir;
+  $('#fsError').textContent = '';
+  $('#fsList').innerHTML = '<span class="spinner"></span>Loading&hellip;';
+  let r;
+  try { r = await api.get('/api/fs?dir=' + encodeURIComponent(dir)); }
+  catch (e) { $('#fsError').textContent = 'Could not reach server.'; return; }
+  if (r.error) { $('#fsError').textContent = r.error; $('#fsList').innerHTML = ''; return; }
+  fsParent = r.parent || '/';
+
+  const list = $('#fsList'); list.innerHTML = '';
+  const mkRow = (name, path, isParent) => {
+    const row = el('div', 'fs-row' + (isParent ? ' dim' : ''));
+    row.innerHTML = `<span class="ico">${isParent ? '&#8593;' : '&#128193;'}</span><span class="nm">${escapeHtml(name)}</span>`;
+    row.ondblclick = () => loadFsDir(path);
+    row.onclick = (ev) => {
+      fsSelPath = path;
+      list.querySelectorAll('.fs-row').forEach(r => r.classList.remove('active'));
+      row.classList.add('active');
+      if (isParent) loadFsDir(path);
+    };
+    if (!isParent) {
+      const open = el('button', 'btn secondary', 'Open');
+      open.onclick = (ev) => { ev.stopPropagation(); loadFsDir(path); };
+      row.appendChild(open);
+    }
+    return row;
+  };
+
+  if (fsParent && fsParent !== fsCurDir) {
+    list.appendChild(mkRow('.. (up one level)', fsParent, true));
+  }
+  (r.dirs || []).forEach(d => list.appendChild(mkRow(d.name, d.path, false)));
+  if (!r.dirs || !r.dirs.length) list.innerHTML = '<div class="muted small" style="padding:10px">(no subfolders)</div>';
+}
+
+function openPicker(targetId) {
+  fsTargetId = targetId;
+  const cur = ($('#' + targetId).value || '').trim() || '/';
+  $('#fsModal').classList.remove('hidden');
+  loadFsDir(cur);
+}
+function closePicker() {
+  $('#fsModal').classList.add('hidden');
+}
+
+$('#btnBrowseSet').onclick = () => openPicker('setTarget');
+$('#btnBrowseScan').onclick = () => openPicker('scanTarget');
+$('#btnBrowseIngest').onclick = () => openPicker('ingestTarget');
+$('#fsCancel').onclick = closePicker;
+$('#fsUp').onclick = () => { if (fsParent && fsParent !== fsCurDir) loadFsDir(fsParent); };
+$('#fsGo').onclick = () => { const d = $('#fsPath').value.trim(); if (d) loadFsDir(d); };
+$('#fsPath').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); $('#fsGo').click(); } });
+document.querySelectorAll('.chip').forEach(c => c.onclick = () => loadFsDir(c.dataset.d));
+$('#fsSelect').onclick = () => {
+  if (!fsSelPath) return toast('Pick a folder first.');
+  $('#' + fsTargetId).value = fsSelPath;
+  closePicker();
+};
+$('#fsModal').addEventListener('click', e => { if (e.target === $('#fsModal')) closePicker(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('#fsModal').classList.contains('hidden')) closePicker(); });
+
+// ── Scan ──
+$('#btnScan').onclick = async () => {
+  const target = $('#scanTarget').value.trim() || $('#setTarget').value.trim();
+  if (!target) return toast('Enter a directory first.');
+  $('#btnScan').disabled = true;
+  $('#scanInfo').innerHTML = '<span class="spinner"></span>Scanning (this can take a minute)&hellip;';
+  const r = await api.post('/api/scan', { target });
+  if (r.error) { toast(r.error); $('#btnScan').disabled = false; $('#scanInfo').textContent = ''; return; }
+  pollScan();
+};
+let scanPoll = null;
+async function pollScan() {
+  const s = await api.get('/api/scan/status');
+  if (s.running) { scanPoll = setTimeout(pollScan, 1200); return; }
+  clearTimeout(scanPoll); $('#btnScan').disabled = false;
+  $('#scanInfo').textContent = '';
+  if (s.error) { toast('Scan error: ' + s.error, 6000); return; }
+  renderScan(s.result);
+}
+function renderScan(r) {
+  if (!r) return;
+  $('#scanResults').classList.remove('hidden');
+  $('#sTot').textContent = r.total_files || 0;
+  $('#sFic').textContent = r.fiction_count || 0;
+  $('#sNon').textContent = r.nonfiction_count || 0;
+  $('#sUntag').textContent = r.untagged_count || 0;
+  $('#sOcr').textContent = r.ocr_needed || 0;
+  $('#sSize').textContent = fmtSize((Object.values(r.stats || {}).reduce((a,s)=>a+(s.size||0),0)/1048576));
+  const tb = $('#sExtBody'); tb.innerHTML = '';
+  Object.entries(r.stats || {}).forEach(([ext, s]) => {
+    tb.appendChild(el('tr', '', `<td>${ext}</td><td>${s.count}</td><td>${s.ocr_needed||'-'}</td><td>${fmtSize((s.size||0)/1048576)}</td>`));
+  });
+  const ocrList = (r.files || []).filter(f => f.needs_ocr);
+  $('#sOcrList').innerHTML = ocrList.length ? ocrList.slice(0, 200).map(f=>`<div>${escapeHtml(f.path)}</div>`).join('')
+    : '<div>No files need OCR.</div>';
+}
+
+// ── Ingest ──
+$('#btnIngest').onclick = async () => {
+  const target = $('#ingestTarget').value.trim() || $('#setTarget').value.trim();
+  const set = $('#ingestSet').value.trim();
+  if (!target) return toast('Enter a directory first.');
+  const r = await api.post('/api/ingest', { target, set, force: $('#ingestForce').checked });
+  toast(r.message);
+  if (r.ok) refreshIngest();
+};
+$('#btnPauseIngest').onclick = async () => {
+  const r = await api.post('/api/ingest/control', { action: $('#btnPauseIngest').textContent === 'Resume' ? 'resume' : 'pause' });
+  toast(r.message, 2500);
+  refreshIngest();
+};
+$('#btnStopIngest').onclick = async () => {
+  if (!confirm('Stop the running index job? It will finish the current file, release the lock, and free chat.')) return;
+  const r = await api.post('/api/ingest/control', { action: 'stop' });
+  toast(r.message, 3500);
+  refreshIngest();
+};
+async function refreshCollections(silent) {
+  let cols;
+  try { cols = await api.get('/api/collections'); } catch (e) { return; }
+  const list = $('#colList');
+  list.innerHTML = cols.length ? cols.map(c => `<div>${escapeHtml(c.name)} &mdash; <span class="tag" style="color:var(--accent)">${c.count}</span> chunks</div>`).join('') : '(none yet)';
+  if (silent) return;
+  const sel = $('#chatSet');
+  const cur = sel.value;
+  sel.innerHTML = cols.map(c => `<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)} (${c.count})</option>`).join('');
+  if (cur && cols.some(c => c.name === cur)) sel.value = cur;
+}
+$('#btnRefreshCollections').onclick = () => refreshCollections();
+
+// ── Chat ──
+async function refreshChatSets() {
+  let cols;
+  try { cols = await api.get('/api/collections'); } catch (e) { return; }
+  const sel = $('#chatSet');
+  sel.innerHTML = cols.map(c => `<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)} (${c.count})</option>`).join('');
+}
+$('#btnAsk').onclick = ask;
+$('#chatInput').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); ask(); } });
+async function ask() {
+  const q = $('#chatInput').textContent.trim();
+  const set = $('#chatSet').value;
+  if (!q) return toast('Type a question.');
+  if (!set) return toast('No collection yet — run Ingest first.');
+  const out = $('#chatOut');
+  out.appendChild(el('div', 'chat-msg user', `<div class="who">you</div>${escapeHtml(q)}`));
+  $('#chatInput').textContent = '';
+  const thinking = el('div', 'chat-msg', '<div class="who">agent</div><span class="spinner"></span>thinking&hellip;');
+  out.appendChild(thinking);
+  const r = await api.post('/api/chat', { query: q, set, filter_kind: $('#chatKind').value });
+  thinking.remove();
+  if (r.error) {
+    out.appendChild(el('div', 'chat-msg', `<div class="who">agent</div><span style="color:var(--err)">${escapeHtml(r.error)}</span>`));
+    return;
+  }
+  const box = el('div', 'chat-msg');
+  if (r.fiction_only) {
+    box.appendChild(el('div', 'fiction-banner', '&#9888; All retrieved sources are fictional works. The answer is drawn from fiction and must not be treated as fact.'));
+  }
+  box.appendChild(el('div', 'who', 'agent'));
+  box.appendChild(el('div', '', escapeHtml(r.answer).replace(/\n/g, '<br>')));
+  if (r.sources && r.sources.length) {
+    box.appendChild(el('div', '', '<div class="small muted" style="margin:12px 0 4px">Sources:</div>'));
+    for (const s of r.sources) {
+      const src = el('div', 'source');
+      const st = s.snippet ? `<div class="small muted" style="margin-top:6px">${escapeHtml(s.snippet.length>220 ? s.snippet.slice(0,220)+'…' : s.snippet)}</div>` : '';
+      src.innerHTML = `<span class="tag ${badgeTag(s.kind)}">${escapeHtml(s.kind)}</span> <span class="title">${escapeHtml(s.title)}</span> <span class="small muted">&mdash; ${escapeHtml(s.source)}</span> <span class="small muted" style="float:right">score ${s.score}</span>${st}`;
+      box.appendChild(src);
+    }
+  }
+  out.appendChild(box);
+  out.scrollTop = out.scrollHeight;
+}
+</script>
+</body>
+</html>
