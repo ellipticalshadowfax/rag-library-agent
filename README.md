@@ -88,6 +88,40 @@ the embedding model; the GUI's `Force re-embed` does this per file too).
 - **Scanned PDFs**: without OCR enabled they are skipped and recorded (they show up in
   the Scan tab). Enabling OCR requires installing `rapidocr-onnxruntime` (already in
   `requirements.txt`) — it is faster but still much slower than text PDFs.
+
+## OCR engine comparison (`scripts/ocr_compare.py`)
+
+`ingest.py` handles a scanned PDF by running one OCR engine over every page. To decide
+which engine is best for a given library, `ocr_compare.py` samples the first few pages
+of each OCR-needing PDF, scores output quality with both **Tesseract** and **RapidOCR**,
+routes each file to the better engine, then full-OCRs it into `ocr/<stem>.txt` (the cache
+`ingest.py` already reads).
+
+```bash
+# compare only (no full OCR); write report to ocr_compare_report.json
+.venv/bin/python scripts/ocr_compare.py /path/to/library --sample-only
+
+# compare + full-OCR every file with its winning engine
+.venv/bin/python scripts/ocr_compare.py /path/to/library
+
+# only process files matching a substring (e.g. one author / one book)
+.venv/bin/python scripts/ocr_compare.py /path/to/library --only "Ansel Adams"
+```
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--sample N` | `5` | pages sampled per file for quality scoring |
+| `--workers N` | `8` | parallel OCR page workers (full pass). Tesseract uses ~1 core/worker; RapidOCR roughly half. |
+| `--sample-only` | off | run the comparison only, skip full-file OCR |
+| `--force` | off | re-OCR files that already have a cache |
+| `--tess-threshold` / `--rapid-threshold` | `0.50` / `0.45` | min sample quality to accept an engine |
+| `--tesseract` / `--tessdata` | auto | paths to the tesseract binary / tessdata |
+
+**Threading**: the full OCR pass is multi-threaded across pages — bump `--workers` to use
+more cores (e.g. `--workers 16` on a 16-core box). Tesseract spawns one subprocess per
+worker, so it scales linearly with `--workers`; RapidOCR is CPU-heavy and shares cores.
+The 5-page *sampling* pass is single-threaded by design. OCR results are cached per file,
+so a run interrupted mid-way resumes on re-run without `--force`.
 - **Very large books**: single files that chunk into more than ~5000 chunks (e.g.
   complete-works omnibuses) are skipped with a `SKIP (oversized…)` message, because
   Chroma upserts have a hard batch limit (~5461). Override with `INGEST_MAX_CHUNKS`.
@@ -105,4 +139,5 @@ the embedding model; the GUI's `Force re-embed` does this per file too).
 .venv/bin/python scripts/scan.py  /path/to/library             # dry-run report
 .venv/bin/python scripts/ingest.py /path/to/library --set library   # index
 .venv/bin/python scripts/agent.py --set library             # chat in terminal
+.venv/bin/python scripts/ocr_compare.py /path/to/library       # pick OCR engine + OCR scans
 ```
