@@ -152,16 +152,34 @@ def scan_directory(target: str, cfg: dict, return_results: bool = False):
     untagged_count = 0
     ocr_files = []
     all_files = []
+    seen_files = 0
 
+    def progress(msg: str):
+        sys.stderr.write(f"\r{msg}\x1b[K")
+        sys.stderr.flush()
+
+    last_dir = None
     for root, dirs, files in os.walk(target_path):
         # Skip hidden dirs and common non-content dirs
         dirs[:] = [d for d in dirs if not d.startswith(".")]
 
+        if root != last_dir:
+            rel_dir = str(Path(root).relative_to(target_path))
+            progress(f"scanning: {rel_dir} ({seen_files} files seen)")
+            last_dir = root
+
+        dir_count = 0
         for fname in files:
             fpath = Path(root) / fname
             ext = fpath.suffix.lower()
             if ext not in EXTENSIONS_TEXT:
                 continue
+
+            seen_files += 1
+            dir_count += 1
+            if dir_count % 10 == 0:
+                progress(f"scanning: {Path(root).relative_to(target_path)} "
+                         f"[{seen_files} files seen]")
 
             rel = str(fpath.relative_to(target_path))
             size = fpath.stat().st_size
@@ -216,6 +234,10 @@ def scan_directory(target: str, cfg: dict, return_results: bool = False):
                     ocr_files.append(info)
 
             all_files.append(info)
+
+    progress(f"done: {seen_files} files seen")
+    sys.stderr.write("\n")
+    sys.stderr.flush()
 
     # Summary table
     if return_results:
