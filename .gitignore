@@ -10,6 +10,7 @@ manifest.db
 ingest.log
 server.log
 scan_results.json
+ocr_compare_report.json
 .ingest.lock
 cache/
 ocr/
