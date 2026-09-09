@@ -54,6 +54,10 @@
   th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
   th { color: var(--muted); font-size: 11.5px; text-transform: uppercase; letter-spacing: .4px; }
   .tag { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; border: 1px solid var(--border); color: var(--muted); }
+  .col-item { border: 1px solid var(--border); border-radius: 10px; padding: 12px; margin-bottom: 10px; background: var(--panel2); }
+  .col-item .col-head { display: flex; align-items: baseline; gap: 8px; }
+  .col-item .col-head .nm { font-weight: 600; font-size: 13px; }
+  .col-item .btn-row { margin-top: 10px; }
   .tag.fiction { color: var(--fiction); border-color: var(--fiction); }
   .tag.nonfiction { color: var(--ok); border-color: var(--ok); }
   .tag.ocr { color: var(--warn); border-color: var(--warn); }
@@ -104,6 +108,22 @@
   #toast.show { display: block; animation: fadein .25s; }
   @keyframes fadein { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; } }
 
+  /* ── First-run wizard ── */
+  .wizard-overlay { position: fixed; inset: 0; background: rgba(14,13,11,.75); display: flex; align-items: center; justify-content: center; z-index: 200; }
+  .wizard { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; width: min(680px, 94vw); max-height: 90vh; display: flex; flex-direction: column; overflow: hidden; }
+  .wizard-head { padding: 20px 22px; border-bottom: 1px solid var(--border); }
+  .wizard-head h2 { font-size: 18px; margin-bottom: 4px; }
+  .wizard-steps { display: flex; gap: 6px; padding: 12px 22px 0; }
+  .wizard-steps .step { font-size: 11px; text-transform: uppercase; letter-spacing: .4px; color: var(--muted); padding: 6px 12px; border: 1px solid var(--border); border-radius: 999px; }
+  .wizard-steps .step.active { color: var(--accent); border-color: var(--accent); }
+  .wizard-steps .step.done { color: var(--ok); border-color: var(--ok); }
+  .wizard-body { padding: 18px 22px; flex: 1; overflow: auto; }
+  .wizard-foot { padding: 14px 22px; border-top: 1px solid var(--border); display: flex; gap: 8px; justify-content: flex-end; align-items: center; }
+  .set-row { display: flex; gap: 8px; margin-bottom: 8px; align-items: center; }
+  .set-row input { flex: 1; }
+  .set-row .nm { width: 150px; flex: none; }
+  .wizard .progress-bar { margin: 8px 0; }
+
   /* ── Folder picker dialog ── */
   .modal-overlay { position: fixed; inset: 0; background: rgba(14,13,11,.62); display: flex; align-items: center; justify-content: center; z-index: 100; }
   .modal { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; width: min(640px, 94vw); max-height: 80vh; display: flex; flex-direction: column; overflow: hidden; }
@@ -137,6 +157,7 @@
 <nav>
   <button data-tab="tab-setup">Setup</button>
   <button data-tab="tab-scan">Scan</button>
+  <button data-tab="tab-ocr">OCR</button>
   <button data-tab="tab-ingest">Ingest</button>
   <button class="active" data-tab="tab-chat">Chat</button>
 </nav>
@@ -145,18 +166,47 @@
   <!-- ═══ SETUP ═══ -->
   <section class="tab" id="tab-setup">
     <div class="panel">
-      <h3>Document source</h3>
-      <label>Library / document directory</label>
-      <div class="dir-row">
-        <input type="text" id="setTarget" placeholder="/path/to/your/library">
-        <button class="btn secondary" id="btnBrowseSet">Browse&hellip;</button>
-      </div>
-    </div>
-    <div class="panel">
-      <h3>Model settings</h3>
+      <h3>LLM API <span class="status-pill" id="setupLlmPill">checking&hellip;</span></h3>
+      <div class="small muted" style="margin-bottom:4px">Any OpenAI-compatible endpoint: local LM Studio / llama.cpp, or a remote/cloud provider (add an API key).</div>
       <div class="grid">
         <div>
-          <label>Embedding model (any Sentence-Transformers)</label>
+          <label>Base URL</label>
+          <input type="text" id="cfgLlmUrl" placeholder="http://localhost:1234/v1">
+        </div>
+        <div>
+          <label>Model id</label>
+          <input type="text" id="cfgLlmModel" placeholder="default">
+        </div>
+        <div>
+          <label>API key (optional, for remote/cloud)</label>
+          <input type="password" id="cfgLlmApiKey" placeholder="sk-...">
+        </div>
+      </div>
+      <div class="btn-row">
+        <button class="btn secondary" id="btnCheckLlm">Check LLM API</button>
+        <button class="btn" id="btnApplyLlm">Apply LLM settings</button>
+      </div>
+      <div class="hidden" id="selfhostPanel" style="margin-top:14px;border-top:1px solid var(--border);padding-top:12px">
+        <h3 style="margin-bottom:4px">Self-hosted (llama-server)</h3>
+        <div class="small muted" id="selfhostInfo">Detecting&hellip;</div>
+        <div class="btn-row">
+          <button class="btn secondary" id="btnSelfhostDownload">Download Qwen3-1.7B</button>
+          <button class="btn secondary" id="btnSelfhostStart">Start llama-server</button>
+          <button class="btn danger" id="btnSelfhostStop">Stop</button>
+        </div>
+        <div class="small muted" id="selfhostProgress"></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3>Embedding model</h3>
+      <div class="grid">
+        <div>
+          <label>Tiered picker</label>
+          <select id="embedPicker"></select>
+        </div>
+        <div>
+          <label>Custom model name (or pick one above)</label>
           <input type="text" id="cfgEmbedModel">
         </div>
         <div>
@@ -167,14 +217,23 @@
             <option value="mps">MPS (Apple Silicon)</option>
           </select>
         </div>
-        <div>
-          <label>LLM base URL (LM Studio)</label>
-          <input type="text" id="cfgLlmUrl">
-        </div>
-        <div>
-          <label>LLM model id</label>
-          <input type="text" id="cfgLlmModel" placeholder="default">
-        </div>
+      </div>
+      <div class="small muted" id="embedMeta"></div>
+      <div class="btn-row">
+        <button class="btn secondary" id="btnEmbedLoad">Download / load</button>
+        <button class="btn" id="btnEmbedApply">Apply embedding model</button>
+      </div>
+      <div class="hidden" id="embedLoadLive" style="margin-top:12px">
+        <div class="small muted" id="embedLoadLabel">idle</div>
+        <div class="progress-wrap" style="margin:8px 0"><div class="progress-bar" id="embedLoadBar"></div></div>
+        <div class="small muted" id="embedLoadInfo"></div>
+      </div>
+      <div class="small muted" id="embedReindexHint" style="margin-top:10px"></div>
+    </div>
+
+    <div class="panel">
+      <h3>Indexing &amp; model tuning</h3>
+      <div class="grid">
         <div>
           <label>LLM temperature</label>
           <input type="number" id="cfgLlmTemp" min="0" max="2" step="0.1">
@@ -204,6 +263,10 @@
           <select id="cfgOcr"><option value="false">No (skip scanned PDFs)</option><option value="true">Yes (slower)</option></select>
         </div>
         <div>
+          <label>OCR write-back (during ingest)</label>
+          <select id="cfgOcrMerge"><option value="true">Merge into original PDF</option><option value="false">Sidecar .txt only</option></select>
+        </div>
+        <div>
           <label>OCR languages (comma-separated)</label>
           <input type="text" id="cfgOcrLanguages" placeholder="en">
         </div>
@@ -214,7 +277,6 @@
       </div>
       <div class="btn-row">
         <button class="btn" id="btnSaveConfig">Save config</button>
-        <button class="btn secondary" id="btnCheckLlm">Check LM Studio</button>
       </div>
     </div>
   </section>
@@ -253,6 +315,57 @@
     </div>
   </section>
 
+  <!-- ═══ OCR ═══ -->
+  <section class="tab" id="tab-ocr">
+    <div class="panel">
+      <h3>OCR scanned PDFs (separate from ingest)</h3>
+      <div class="grid">
+        <div>
+          <label>Directory with scanned PDFs</label>
+          <div class="dir-row">
+            <input type="text" id="ocrTarget" placeholder="/path/to/pdfs">
+            <button class="btn secondary" id="btnBrowseOcr">Browse&hellip;</button>
+          </div>
+        </div>
+        <div>
+          <label>Write-back mode</label>
+          <select id="ocrMode">
+            <option value="merge">Merge into original PDF (auto write-back)</option>
+            <option value="sidecar">Write .txt files only (don't touch PDF)</option>
+          </select>
+        </div>
+      </div>
+      <div class="grid">
+        <div>
+          <label>OCR languages (comma-separated)</label>
+          <input type="text" id="ocrLanguages" placeholder="en">
+        </div>
+        <div>
+          <label>OCR engine</label>
+          <select id="ocrBackend">
+            <option value="tesseract">Tesseract (default)</option>
+            <option value="rapidocr">RapidOCR</option>
+          </select>
+        </div>
+        <div>
+          <label style="margin-top:18px"><input type="checkbox" id="ocrForce"> Re-OCR everything (ignore existing text layers)</label>
+        </div>
+      </div>
+      <div class="btn-row">
+        <button class="btn" id="btnOcr">Start OCR</button>
+        <button class="btn secondary hidden" id="btnPauseOcr">Pause</button>
+        <button class="btn danger hidden" id="btnStopOcr">Stop</button>
+      </div>
+    </div>
+    <div class="panel hidden" id="ocrLive">
+      <h3>OCR job</h3>
+      <div class="small muted" id="ocrLabel">idle</div>
+      <div class="progress-wrap" style="margin:10px 0"><div class="progress-bar" id="ocrBar"></div></div>
+      <div class="small muted">processed <span id="oDone">0</span> &middot; skipped <span id="oSkip">0</span> &middot; errors <span id="oErr">0</span> &middot; <span id="oEta"></span></div>
+      <div id="ocrLog" class="log-box" style="margin-top:12px"></div>
+    </div>
+  </section>
+
   <!-- ═══ INGEST ═══ -->
   <section class="tab" id="tab-ingest">
     <div class="panel">
@@ -284,6 +397,26 @@
       <div class="progress-wrap" style="margin:10px 0"><div class="progress-bar" id="ingestBar"></div></div>
       <div class="small muted">processed <span id="iDone">0</span> &middot; skipped <span id="iSkip">0</span> &middot; errors <span id="iErr">0</span> &middot; <span id="iEta"></span></div>
       <div id="ingestLog" class="log-box" style="margin-top:12px"></div>
+    </div>
+    <div class="panel">
+      <h3>Import from a new location</h3>
+      <div class="grid">
+        <div>
+          <label>Collection name</label>
+          <input type="text" id="impSet" placeholder="e.g. my_books">
+        </div>
+        <div>
+          <label>Directory (new location)</label>
+          <div class="dir-row">
+            <input type="text" id="impTarget" placeholder="/path/to/new/library">
+            <button class="btn secondary" id="btnBrowseImp">Browse&hellip;</button>
+          </div>
+        </div>
+      </div>
+      <div class="btn-row">
+        <button class="btn" id="btnImport">Register &amp; ingest</button>
+      </div>
+      <div class="small muted" style="margin-top:8px">Adds a new collection and indexes it. Use a name that already exists to instead add this location's documents into that collection.</div>
     </div>
     <div class="panel">
       <h3>Collections</h3>
@@ -332,6 +465,84 @@
   </section>
 
 </main>
+
+<!-- ── First-run wizard ── -->
+<div class="wizard-overlay hidden" id="wizard">
+  <div class="wizard">
+    <div class="wizard-head">
+      <h2>&#128218; Welcome to RAG Library Agent</h2>
+      <div class="small muted">Let's get the app set up for this machine. You can change anything later in the <b>Setup</b> tab.</div>
+    </div>
+    <div class="wizard-steps" id="wizSteps">
+      <span class="step active" data-step="0">1 &middot; LLM API</span>
+      <span class="step" data-step="1">2 &middot; Embeddings</span>
+      <span class="step" data-step="2">3 &middot; Library</span>
+    </div>
+    <div class="wizard-body">
+      <div class="wiz-page" data-page="0">
+        <h3>LLM API</h3>
+        <div class="small muted" style="margin-bottom:4px">Point to your local server (LM Studio / llama.cpp) or any remote/cloud OpenAI-compatible endpoint.</div>
+        <div>
+          <label>Base URL</label>
+          <input type="text" id="wizLlmUrl" placeholder="http://localhost:1234/v1">
+        </div>
+        <div>
+          <label>Model id</label>
+          <input type="text" id="wizLlmModel" placeholder="default">
+        </div>
+        <div>
+          <label>API key (optional, for remote/cloud)</label>
+          <input type="password" id="wizLlmApiKey" placeholder="sk-...">
+        </div>
+        <div class="btn-row">
+          <button class="btn secondary" id="btnWizCheckLlm">Test connection</button>
+          <span class="small muted" id="wizLlmStatus"></span>
+        </div>
+      </div>
+      <div class="wiz-page hidden" data-page="1">
+        <h3>Embedding model</h3>
+        <div class="small muted" style="margin-bottom:4px">Pick a model for indexing your documents. Smaller models are fast on CPU.</div>
+        <div>
+          <label>Tiered picker</label>
+          <select id="wizEmbedPicker"></select>
+        </div>
+        <div>
+          <label>Custom model name (or pick one above)</label>
+          <input type="text" id="wizEmbedModel">
+        </div>
+        <div>
+          <label>Embedding device</label>
+          <select id="wizEmbedDevice">
+            <option value="cpu">CPU</option>
+            <option value="gpu">GPU (CUDA)</option>
+            <option value="mps">MPS (Apple Silicon)</option>
+          </select>
+        </div>
+        <div class="small muted" id="wizEmbedMeta"></div>
+        <div class="btn-row">
+          <button class="btn secondary" id="btnWizEmbedLoad">Download / load</button>
+        </div>
+        <div class="hidden" id="wizEmbedLive" style="margin-top:10px">
+          <div class="small muted" id="wizEmbedLabel">idle</div>
+          <div class="progress-bar" id="wizEmbedBar"></div>
+          <div class="small muted" id="wizEmbedInfo"></div>
+        </div>
+      </div>
+      <div class="wiz-page hidden" data-page="2">
+        <h3>Library directories</h3>
+        <div class="small muted" style="margin-bottom:8px">Each set is a directory you index and ask questions about. Edit paths, add or remove sets.</div>
+        <div id="wizSets"></div>
+        <button class="btn secondary" id="btnWizAddSet">+ Add directory</button>
+      </div>
+    </div>
+    <div class="wizard-foot">
+      <button class="btn secondary" id="btnWizSkip">Skip for now</button>
+      <span style="flex:1"></span>
+      <button class="btn secondary hidden" id="btnWizBack">Back</button>
+      <button class="btn" id="btnWizNext">Next</button>
+    </div>
+  </div>
+</div>
 
 <!-- ── Folder picker dialog ── -->
 <div class="modal-overlay hidden" id="fsModal">
@@ -386,6 +597,7 @@ function goTab(id) {
   document.querySelectorAll('nav button').forEach(x => x.classList.toggle('active', x.dataset.tab === id));
   document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x.id === id));
   if (id === 'tab-ingest') { refreshCollections(); refreshIngest(); }
+  if (id === 'tab-ocr') refreshOcr();
   if (id === 'tab-chat') refreshChatSets();
 }
 document.querySelectorAll('nav button').forEach(b => b.onclick = () => goTab(b.dataset.tab));
@@ -394,13 +606,24 @@ document.querySelectorAll('nav button').forEach(b => b.onclick = () => goTab(b.d
 async function refreshStatus() {
   try {
     const sys = await api.get('/api/system');
+    const llm = sys.llm || sys.lmstudio;
     const pill = $('#llmPill');
-    if (sys.lmstudio.online) {
-      pill.textContent = 'LLM: online (' + (sys.lmstudio.models.length || 'default') + ')';
+    if (llm.online) {
+      pill.textContent = 'LLM: online (' + (llm.models.length || 'default') + ')';
       pill.className = 'status-pill ok';
     } else {
       pill.textContent = 'LLM: offline';
       pill.className = 'status-pill err';
+    }
+    const sp = $('#setupLlmPill');
+    if (sp) {
+      if (llm.online) {
+        sp.textContent = 'online (' + (llm.models.length || 'default') + ')';
+        sp.className = 'status-pill ok';
+      } else {
+        sp.textContent = 'offline';
+        sp.className = 'status-pill err';
+      }
     }
   } catch (e) { $('#llmPill').textContent = 'LLM: ???'; }
 }
@@ -477,13 +700,111 @@ async function refreshIngest() {
 setInterval(refreshIngest, 2500);
 refreshChatSets();
 
+// ── OCR tab ──
+async function refreshOcr() {
+  let s;
+  try { s = await api.get('/api/ocr/status'); }
+  catch (e) { return; }
+  const running = !!s.running;
+  const startBtn = $('#btnOcr');
+  const pauseBtn = $('#btnPauseOcr');
+  const stopBtn = $('#btnStopOcr');
+  startBtn.disabled = running;
+  pauseBtn.classList.toggle('hidden', !running);
+  stopBtn.classList.toggle('hidden', !running);
+  pauseBtn.textContent = s.paused ? 'Resume' : 'Pause';
+
+  if (running) {
+    $('#ocrLive').classList.remove('hidden');
+    const pct = s.total ? Math.min(100, Math.round(100 * (s.current || 0) / s.total)) : 5;
+    $('#ocrBar').style.width = (s.paused ? Math.max(pct, 5) : pct) + '%';
+    $('#oDone').textContent = s.done || 0; $('#oSkip').textContent = s.skipped || 0; $('#oErr').textContent = s.errors || 0;
+    const suffix = s.paused ? ' (paused)' : '';
+    $('#ocrLabel').innerHTML = `<span class="spinner"></span>OCR ${escapeHtml(s.mode || '…')}${suffix} &mdash; file ${s.current || '…'}/${s.total || '…'}`;
+    if (s.lines && s.lines.length) {
+      $('#ocrLog').textContent = s.lines.join('');
+      $('#ocrLog').scrollTop = $('#ocrLog').scrollHeight;
+    }
+  } else if (s.finished) {
+    $('#ocrLive').classList.remove('hidden');
+    $('#ocrLabel').textContent = '✓ OCR finished';
+  }
+}
+setInterval(refreshOcr, 2500);
+
+$('#btnOcr').onclick = async () => {
+  const r = await api.post('/api/ocr', {
+    target: $('#ocrTarget').value.trim(),
+    mode: $('#ocrMode').value,
+    force: $('#ocrForce').checked,
+    backend: $('#ocrBackend').value,
+    languages: $('#ocrLanguages').value.trim() || undefined,
+  });
+  toast(r.ok ? r.message : (r.message || 'OCR start failed.'));
+  if (r.ok) refreshOcr();
+};
+$('#btnPauseOcr').onclick = async () => {
+  const r = await api.post('/api/ocr/control', { action: $('#btnPauseOcr').textContent === 'Resume' ? 'resume' : 'pause' });
+  toast(r.message || (r.ok ? 'OK' : 'Failed'));
+  refreshOcr();
+};
+$('#btnStopOcr').onclick = async () => {
+  const r = await api.post('/api/ocr/control', { action: 'stop' });
+  toast(r.message || (r.ok ? 'OK' : 'Failed'));
+  refreshOcr();
+};
+
 // ── Config load/save ──
+let embedModelList = [];
+function tierLabel(m) {
+  return `[${m.tier}] ${m.label} — ${m.dim} dim · ~${fmtSize(m.est_mb)}${m.mrl ? ' · MRL' : ''}`;
+}
+async function renderEmbedPicker() {
+  let list = [];
+  try { list = await api.get('/api/embed/models'); } catch (e) {}
+  embedModelList = Array.isArray(list) ? list : [];
+  const fill = (sel) => {
+    sel.innerHTML = '';
+    const groups = {};
+    for (const m of embedModelList) (groups[m.tier] = groups[m.tier] || []).push(m);
+    for (const tier of Object.keys(groups)) {
+      const og = document.createElement('optgroup');
+      og.label = tier;
+      for (const m of groups[tier]) {
+        const o = document.createElement('option');
+        o.value = m.id; o.textContent = tierLabel(m);
+        og.appendChild(o);
+      }
+      sel.appendChild(og);
+    }
+  };
+  fill($('#embedPicker'));
+  fill($('#wizEmbedPicker'));
+  const cur = ($('#cfgEmbedModel').value || '').trim();
+  for (const sel of [$('#embedPicker'), $('#wizEmbedPicker')]) {
+    if (cur && [...sel.options].some(o => o.value === cur)) sel.value = cur;
+  }
+}
+function updateEmbedMeta() {
+  const id = ($('#cfgEmbedModel').value || '').trim();
+  const m = embedModelList.find(x => x.id === id);
+  if (!m) { $('#embedMeta').textContent = ''; return; }
+  const state = m.current ? 'current' : (m.cached ? 'cached on disk' : 'not downloaded');
+  $('#embedMeta').textContent = `${m.dim} dim · ~${fmtSize(m.est_mb)}${m.mrl ? ' · MRL' : ''} · ${state}${m.new ? ' · new' : ''}`;
+}
+$('#cfgEmbedModel').addEventListener('input', updateEmbedMeta);
+$('#embedPicker').addEventListener('change', () => {
+  const v = $('#embedPicker').value;
+  if (v) { $('#cfgEmbedModel').value = v; updateEmbedMeta(); }
+});
+
 async function loadConfig() {
   const c = await api.get('/api/config');
   $('#cfgEmbedModel').value = c.embed_model || '';
   $('#cfgEmbedDevice').value = c.embed_device || 'cpu';
   $('#cfgLlmUrl').value = c.llm_base_url || '';
   $('#cfgLlmModel').value = c.llm_model || '';
+  $('#cfgLlmApiKey').value = c.llm_api_key || '';
   $('#cfgLlmTemp').value = c.llm_temperature ?? 0.3;
   $('#cfgLlmMaxTokens').value = c.llm_max_tokens || 2048;
   $('#cfgChunkTokens').value = c.chunk_tokens || 330;
@@ -491,9 +812,13 @@ async function loadConfig() {
   $('#cfgTopK').value = c.retrieval_top_k || 10;
   $('#cfgBatchSize').value = c.ingest_batch_size || 500;
   $('#cfgOcr').value = String(c.ocr_enabled || false);
+  $('#cfgOcrMerge').value = String(c.ocr_merge ?? true);
   $('#cfgOcrLanguages').value = (c.ocr_languages || ['en']).join(', ');
+  $('#ocrLanguages').value = (c.ocr_languages || ['en']).join(', ');
   $('#cfgFictionTags').value = (c.fiction_tags || ['Fiction', 'Short Stories', 'Literary']).join(', ');
   $('#curveInfo').textContent = 'embeddings: ' + (c.embed_model || '');
+  renderEmbedPicker();
+  updateEmbedMeta();
 }
 loadConfig();
 
@@ -511,6 +836,7 @@ $('#btnSaveConfig').onclick = async () => {
     retrieval_top_k: parseInt($('#cfgTopK').value) || 10,
     ingest_batch_size: parseInt($('#cfgBatchSize').value) || 500,
     ocr_enabled: $('#cfgOcr').value === 'true',
+    ocr_merge: $('#cfgOcrMerge').value === 'true',
     ocr_languages: splitList($('#cfgOcrLanguages').value) || ['en'],
     fiction_tags: splitList($('#cfgFictionTags').value) || ['Fiction', 'Short Stories', 'Literary'],
   };
@@ -520,6 +846,236 @@ $('#btnSaveConfig').onclick = async () => {
 };
 
 $('#btnCheckLlm').onclick = () => { toast('Checking...', 400); setTimeout(refreshStatus, 1500); };
+$('#btnApplyLlm').onclick = async () => {
+  const r = await api.post('/api/llm/apply', {
+    llm_base_url: $('#cfgLlmUrl').value.trim(),
+    llm_model: $('#cfgLlmModel').value.trim(),
+    llm_api_key: $('#cfgLlmApiKey').value,
+  });
+  toast(r.ok ? 'LLM settings applied.' : 'Apply failed.');
+  if (r.ok) refreshStatus();
+};
+
+// ── Embedding model load / apply ──
+$('#btnEmbedLoad').onclick = async () => {
+  const model = $('#cfgEmbedModel').value.trim();
+  if (!model) return toast('Enter a model name first.');
+  const r = await api.post('/api/embed/load', { model, device: $('#cfgEmbedDevice').value });
+  if (!r.ok) return toast(r.error || 'Load failed.');
+  $('#embedLoadLive').classList.remove('hidden');
+  pollEmbedLoad();
+};
+let embedLoadPoll = null;
+async function pollEmbedLoad() {
+  const s = await api.get('/api/embed/load/status');
+  const live = $('#embedLoadLive');
+  if (s.running) {
+    live.classList.remove('hidden');
+    $('#embedLoadLabel').innerHTML = `<span class="spinner"></span>Loading ${escapeHtml(s.model || '')}…`;
+    const pct = s.progress > 0 ? s.progress : (s.phase === 'loading' ? 8 : 0);
+    $('#embedLoadBar').style.width = Math.max(4, Math.min(95, pct)) + '%';
+    const est = s.est_mb ? `~${fmtSize(s.est_mb)} est` : '';
+    const got = s.real_mb ? `${fmtSize(s.real_mb)} on disk` : '';
+    $('#embedLoadInfo').textContent = [est, got].filter(Boolean).join(' · ');
+    embedLoadPoll = setTimeout(pollEmbedLoad, 1000);
+    return;
+  }
+  if (s.error) {
+    live.classList.remove('hidden');
+    $('#embedLoadLabel').textContent = 'Error: ' + s.error;
+    $('#embedLoadInfo').textContent = '';
+    return;
+  }
+  if (s.done) {
+    live.classList.remove('hidden');
+    $('#embedLoadLabel').textContent = '✓ ' + escapeHtml(s.model || '') + ' ready (dim ' + s.dim + ')';
+    $('#embedLoadBar').style.width = '100%';
+    $('#embedLoadInfo').textContent = s.real_mb ? `~${fmtSize(s.real_mb)} on disk` : '';
+  }
+}
+$('#btnEmbedApply').onclick = async () => {
+  const model = $('#cfgEmbedModel').value.trim();
+  if (!model) return toast('Enter a model name first.');
+  const r = await api.post('/api/embed/apply', {
+    model, device: $('#cfgEmbedDevice').value,
+    dim: (embedModelList.find(m => m.id === model) || {}).dim,
+  });
+  if (!r.ok) return toast('Apply failed.');
+  toast('Embedding model applied. Re-index with Force re-embed (Ingest tab) to rebuild vectors.');
+  $('#embedReindexHint').innerHTML = '&#9888; Changing the embedding model requires re-indexing: open the <b>Ingest</b> tab, tick <b>Force re-embed</b>, and run ingest again.';
+  renderEmbedPicker(); updateEmbedMeta();
+};
+
+// ── Self-hosted llama-server (dormant when binary absent) ──
+async function refreshSelfhost() {
+  let s;
+  try { s = await api.get('/api/llm/selfhost'); } catch (e) { return; }
+  const panel = $('#selfhostPanel');
+  if (!s.available) { panel.classList.add('hidden'); return; }
+  panel.classList.remove('hidden');
+  $('#selfhostInfo').textContent = `llama-server found at ${s.binary}. Models in ${s.dir}: ${s.models.length ? s.models.join(', ') : '(none — download one below)'}`;
+  $('#selfhostProgress').textContent = '';
+}
+$('#btnSelfhostDownload').onclick = async () => {
+  const r = await api.post('/api/llm/download');
+  if (!r.ok) return toast(r.error || 'Download failed.');
+  pollSelfhostDownload();
+};
+async function pollSelfhostDownload() {
+  const s = await api.get('/api/llm/download/status');
+  if (s.running) {
+    const pct = s.progress > 0 ? s.progress : 5;
+    $('#selfhostProgress').textContent = `Downloading Qwen3-1.7B… ${fmtSize(s.downloaded_mb)} / ~${fmtSize(s.est_mb)}`;
+    setTimeout(pollSelfhostDownload, 1000);
+    return;
+  }
+  if (s.error) { $('#selfhostProgress').textContent = 'Error: ' + s.error; return; }
+  if (s.phase === 'done') { $('#selfhostProgress').textContent = '✓ Downloaded. You can start llama-server now.'; refreshSelfhost(); }
+}
+$('#btnSelfhostStart').onclick = async () => {
+  const r = await api.post('/api/llm/start');
+  toast(r.ok ? 'llama-server started.' : (r.error || 'Failed to start.'));
+  if (r.ok) refreshSelfhost();
+};
+$('#btnSelfhostStop').onclick = async () => {
+  const r = await api.post('/api/llm/control', { action: 'stop' });
+  toast(r.ok ? 'llama-server stopped.' : (r.error || 'Failed to stop.'));
+};
+refreshSelfhost();
+
+// ── First-run wizard ──
+let wizStep = 0;
+let wizSets = [];
+
+function wizGo(n) {
+  wizStep = Math.max(0, Math.min(2, n));
+  document.querySelectorAll('.wizard-steps .step').forEach((s, i) => {
+    s.classList.toggle('active', i === wizStep);
+    s.classList.toggle('done', i < wizStep);
+  });
+  document.querySelectorAll('.wiz-page').forEach(p => p.classList.toggle('hidden', +p.dataset.page !== wizStep));
+  $('#btnWizBack').classList.toggle('hidden', wizStep === 0);
+  $('#btnWizNext').textContent = wizStep === 2 ? 'Finish' : 'Next';
+}
+function renderWizEmbedPicker() {
+  const sel = $('#wizEmbedPicker');
+  sel.innerHTML = '';
+  const groups = {};
+  for (const m of embedModelList) (groups[m.tier] = groups[m.tier] || []).push(m);
+  for (const tier of Object.keys(groups)) {
+    const og = document.createElement('optgroup');
+    og.label = tier;
+    for (const m of groups[tier]) {
+      const o = document.createElement('option');
+      o.value = m.id; o.textContent = tierLabel(m);
+      og.appendChild(o);
+    }
+    sel.appendChild(og);
+  }
+  const cur = $('#wizEmbedModel').value.trim();
+  if (cur && [...sel.options].some(o => o.value === cur)) sel.value = cur;
+  else if (sel.options.length) sel.selectedIndex = 0;
+}
+$('#wizEmbedPicker').addEventListener('change', () => {
+  const v = $('#wizEmbedPicker').value;
+  if (v) $('#wizEmbedModel').value = v;
+});
+function renderWizSets() {
+  const box = $('#wizSets');
+  box.innerHTML = '';
+  wizSets.forEach((set, i) => {
+    const row = el('div', 'set-row');
+    const nm = document.createElement('input'); nm.className = 'nm'; nm.placeholder = 'set name'; nm.value = set.name;
+    const pt = document.createElement('input'); pt.placeholder = '/path/to/library'; pt.value = set.path;
+    const del = el('button', 'btn danger', 'Remove');
+    nm.oninput = () => wizSets[i].name = nm.value;
+    pt.oninput = () => wizSets[i].path = pt.value;
+    del.onclick = () => { wizSets.splice(i, 1); renderWizSets(); };
+    row.appendChild(nm); row.appendChild(pt); row.appendChild(del);
+    box.appendChild(row);
+  });
+}
+$('#btnWizAddSet').onclick = () => { wizSets.push({ name: 'set' + (wizSets.length + 1), path: '' }); renderWizSets(); };
+$('#btnWizBack').onclick = () => wizGo(wizStep - 1);
+$('#btnWizNext').onclick = async () => {
+  if (wizStep < 2) { wizGo(wizStep + 1); return; }
+  const sets = {};
+  wizSets.forEach(s => { if (s.name && s.path) sets[s.name.trim()] = { path: s.path.trim(), kind: 'local' }; });
+  const body = {
+    llm_base_url: $('#wizLlmUrl').value.trim(),
+    llm_model: $('#wizLlmModel').value.trim(),
+    llm_api_key: $('#wizLlmApiKey').value,
+    embed_model: $('#wizEmbedModel').value.trim(),
+    embed_device: $('#wizEmbedDevice').value,
+    embed_dim: (embedModelList.find(m => m.id === $('#wizEmbedModel').value.trim()) || {}).dim,
+    sets,
+  };
+  const r = await api.post('/api/setup/finish', body);
+  if (r.ok) {
+    $('#wizard').classList.add('hidden');
+    toast('Setup complete. Open the Ingest tab to index your library.');
+    loadConfig(); refreshStatus();
+  } else toast('Setup failed.');
+};
+$('#btnWizSkip').onclick = async () => {
+  await api.post('/api/setup/finish', {});
+  $('#wizard').classList.add('hidden');
+  loadConfig();
+};
+$('#btnWizEmbedLoad').onclick = async () => {
+  const model = $('#wizEmbedModel').value.trim();
+  if (!model) return toast('Enter a model name first.');
+  const r = await api.post('/api/embed/load', { model, device: $('#wizEmbedDevice').value });
+  if (!r.ok) return toast(r.error || 'Load failed.');
+  $('#wizEmbedLive').classList.remove('hidden');
+  pollWizEmbedLoad();
+};
+async function pollWizEmbedLoad() {
+  const s = await api.get('/api/embed/load/status');
+  if (s.running) {
+    $('#wizEmbedLabel').innerHTML = `<span class="spinner"></span>Loading ${escapeHtml(s.model || '')}…`;
+    $('#wizEmbedBar').style.width = Math.max(4, Math.min(95, s.progress > 0 ? s.progress : 8)) + '%';
+    $('#wizEmbedInfo').textContent = [s.est_mb ? `~${fmtSize(s.est_mb)} est` : '', s.real_mb ? `${fmtSize(s.real_mb)} on disk` : ''].filter(Boolean).join(' · ');
+    setTimeout(pollWizEmbedLoad, 1000);
+    return;
+  }
+  if (s.error) { $('#wizEmbedLabel').textContent = 'Error: ' + s.error; return; }
+  if (s.done) {
+    $('#wizEmbedLabel').textContent = '✓ ready (dim ' + s.dim + ')';
+    $('#wizEmbedBar').style.width = '100%';
+    $('#wizEmbedInfo').textContent = s.real_mb ? `~${fmtSize(s.real_mb)} on disk` : '';
+  }
+}
+$('#btnWizCheckLlm').onclick = async () => {
+  $('#wizLlmStatus').textContent = 'Testing…';
+  const r = await api.post('/api/llm/apply', {
+    llm_base_url: $('#wizLlmUrl').value.trim(),
+    llm_model: $('#wizLlmModel').value.trim(),
+    llm_api_key: $('#wizLlmApiKey').value,
+  });
+  if (r.ok) {
+    const st = await api.get('/api/llm/status');
+    $('#wizLlmStatus').textContent = st.online ? '✓ online (' + (st.models.length || 'default') + ')' : '✗ offline';
+  } else $('#wizLlmStatus').textContent = 'Failed to save';
+};
+async function checkSetup() {
+  let s;
+  try { s = await api.get('/api/setup/status'); } catch (e) { return; }
+  if (!s.needs_setup) return;
+  if (!embedModelList.length) {
+    try { embedModelList = await api.get('/api/embed/models'); } catch (e) {}
+  }
+  $('#wizLlmUrl').value = s.llm.url || '';
+  $('#wizLlmModel').value = s.llm.model || '';
+  $('#wizEmbedModel').value = s.embed.model || '';
+  $('#wizEmbedDevice').value = s.embed.device || 'cpu';
+  renderWizEmbedPicker();
+  wizSets = Object.entries(s.sets || {}).map(([name, v]) => ({ name, path: (v && v.path) || '' }));
+  renderWizSets();
+  wizGo(0);
+  $('#wizard').classList.remove('hidden');
+}
+checkSetup();
 
 // ── Folder picker dialog ──
 let fsTargetId = null;
@@ -576,9 +1132,10 @@ function closePicker() {
   $('#fsModal').classList.add('hidden');
 }
 
-$('#btnBrowseSet').onclick = () => openPicker('setTarget');
 $('#btnBrowseScan').onclick = () => openPicker('scanTarget');
+$('#btnBrowseOcr').onclick = () => openPicker('ocrTarget');
 $('#btnBrowseIngest').onclick = () => openPicker('ingestTarget');
+$('#btnBrowseImp').onclick = () => openPicker('impTarget');
 $('#fsCancel').onclick = closePicker;
 $('#fsUp').onclick = () => { if (fsParent && fsParent !== fsCurDir) loadFsDir(fsParent); };
 $('#fsGo').onclick = () => { const d = $('#fsPath').value.trim(); if (d) loadFsDir(d); };
@@ -594,7 +1151,7 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('#fsMod
 
 // ── Scan ──
 $('#btnScan').onclick = async () => {
-  const target = $('#scanTarget').value.trim() || $('#setTarget').value.trim();
+  const target = $('#scanTarget').value.trim();
   if (!target) return toast('Enter a directory first.');
   $('#btnScan').disabled = true;
   $('#scanInfo').innerHTML = '<span class="spinner"></span>Scanning (this can take a minute)&hellip;';
@@ -631,7 +1188,7 @@ function renderScan(r) {
 
 // ── Ingest ──
 $('#btnIngest').onclick = async () => {
-  const target = $('#ingestTarget').value.trim() || $('#setTarget').value.trim();
+  const target = $('#ingestTarget').value.trim();
   const set = $('#ingestSet').value.trim();
   if (!target) return toast('Enter a directory first.');
   const r = await api.post('/api/ingest', { target, set, force: $('#ingestForce').checked });
@@ -653,7 +1210,25 @@ async function refreshCollections(silent) {
   let cols;
   try { cols = await api.get('/api/collections'); } catch (e) { return; }
   const list = $('#colList');
-  list.innerHTML = cols.length ? cols.map(c => `<div>${escapeHtml(c.name)} &mdash; <span class="tag" style="color:var(--accent)">${c.count}</span> chunks</div>`).join('') : '(none yet)';
+  list.innerHTML = '';
+  if (!cols.length) { list.innerHTML = '(none yet)'; }
+  for (const c of cols) {
+    const row = el('div', 'col-item');
+    row.appendChild(el('div', 'col-head',
+      `<span class="nm">${escapeHtml(c.name)}</span> <span class="tag" style="color:var(--accent)">${c.count}</span> chunks`));
+    if (c.path) row.appendChild(el('div', 'small muted', escapeHtml(c.path)));
+    const acts = el('div', 'btn-row');
+    const mkBtn = (label, cls, fn) => {
+      const b = el('button', 'btn secondary ' + cls, label);
+      b.onclick = fn;
+      acts.appendChild(b);
+    };
+    mkBtn('Update', '', () => updateCollection(c));
+    mkBtn('Rename', '', () => renameCollection(c));
+    mkBtn('Delete', 'danger', () => deleteCollection(c));
+    row.appendChild(acts);
+    list.appendChild(row);
+  }
   if (silent) return;
   const sel = $('#chatSet');
   const cur = sel.value;
@@ -661,6 +1236,55 @@ async function refreshCollections(silent) {
   if (cur && cols.some(c => c.name === cur)) sel.value = cur;
 }
 $('#btnRefreshCollections').onclick = () => refreshCollections();
+
+// Re-ingest an existing collection from its configured location (or a new one).
+async function updateCollection(c) {
+  if ($('#btnIngest').disabled) return toast('Ingest is already running.');
+  let path = c.path;
+  if (!path) {
+    path = prompt(`No directory is saved for collection "${c.name}". Enter the directory to index:`);
+    if (!path) return;
+  } else if (!confirm(`Re-ingest "${c.name}" from:\n${path}\n\nNew/changed files will be added; missing ones stay (incremental).`)) {
+    return;
+  }
+  const r = await api.post('/api/sets', { name: c.name, path });
+  if (!r.ok) return toast(r.message || 'Failed to save set.', 4000);
+  const s = await api.post('/api/ingest', { target: path, set: c.name, force: false });
+  toast(s.message);
+  if (s.ok) { $('#ingestLive').classList.remove('hidden'); refreshIngest(); }
+}
+
+async function renameCollection(c) {
+  const to = prompt(`Rename collection "${c.name}" to:`, c.name);
+  if (!to || to === c.name) return;
+  const r = await api.post('/api/collections/rename', { from: c.name, to: to.trim() });
+  toast(r.message, 3500);
+  refreshCollections();
+}
+
+async function deleteCollection(c) {
+  if (!confirm(`Delete collection "${c.name}" (${c.count} chunks)? This removes its index entries.`)) return;
+  const r = await api.post('/api/collections/' + encodeURIComponent(c.name), {}, 'DELETE');
+  toast(r.message, 3500);
+  refreshCollections();
+}
+
+$('#btnImport').onclick = async () => {
+  const name = $('#impSet').value.trim();
+  const path = $('#impTarget').value.trim();
+  if (!name) return toast('Enter a collection name.');
+  if (!path) return toast('Enter the directory to import.');
+  const r = await api.post('/api/sets', { name, path });
+  if (!r.ok) return toast(r.message || 'Failed to register set.', 4000);
+  const s = await api.post('/api/ingest', { target: path, set: name, force: false });
+  toast(s.message);
+  if (s.ok) {
+    $('#ingestSet').value = name;
+    $('#ingestTarget').value = path;
+    $('#ingestLive').classList.remove('hidden');
+    refreshIngest();
+  }
+};
 
 // ── Chat ──
 let currentConv = null;   // conversation id, or null for an unsaved new chat

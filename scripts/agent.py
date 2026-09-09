@@ -36,9 +36,12 @@ def load_config():
 
 
 def setup_client(cfg: dict) -> OpenAI:
+    # Local servers (LM Studio / llama.cpp) accept a dummy key; a configured
+    # llm_api_key enables remote/cloud OpenAI-compatible providers.
+    api_key = cfg.get("llm_api_key") or "lm-studio"
     return OpenAI(
         base_url=cfg["llm_base_url"],
-        api_key="lm-studio",
+        api_key=api_key,
     )
 
 
@@ -285,7 +288,7 @@ def main():
 
         except Exception as e:
             console.print(f"[red]LLM error: {e}[/red]")
-            console.print("[dim]Is LMStudio running? Try: ./start_lmstudio.sh[/dim]\n")
+            console.print("[dim]Is the LLM API running on the configured URL? Check the Setup tab.[/dim]\n")
 
 
 if __name__ == "__main__":

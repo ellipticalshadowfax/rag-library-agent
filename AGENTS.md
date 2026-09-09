@@ -16,7 +16,18 @@ repo. Do not introduce them back in.
 - `scripts/server.py` — Flask backend (web server + all `/api/*` endpoints).
 - `scripts/agent.py` — chat helpers: retrieval, context building, the `SYSTEM_PROMPT`.
 - `scripts/ingest.py` — CLI indexer: walks a directory, extracts text, chunks,
-  embeds (E5 prefixes), upserts into ChromaDB. Writes `manifest.db`.
+  embeds (E5 prefixes), upserts into ChromaDB. Writes `manifest.db`. OCR-enabled
+  ingests can merge OCR text back into the source PDF (`ocr_merge`).
+- `scripts/ocr.py` — CLI OCR tool (separate from ingest): OCRs scanned PDFs and
+  either merges the text layer back into the original (`--mode merge`) or writes
+  sidecar `.txt` files (`--mode sidecar`). Writes `.ocr.lock`, logs to `ocr.log`.
+  Driven by the web UI's OCR tab via `/api/ocr*`. The OCR engine is chosen by the
+  `ocr_backend` config (`tesseract` default, `rapidocr` optional). Tesseract is a
+  mamba/conda build; its binary lives at
+  `/tmp/opencode/mamba/envs/tess/bin/tesseract` (tessdata at
+  `/tmp/opencode/mamba/envs/tess/share/tessdata`), wired through
+  `ocr_compare.py` (`DEFAULT_TESS_BIN` / `_setup_tesseract`). Override with the
+  `TESSERACT_BIN` env var.
 - `scripts/scan.py` — CLI dry-run scanner (stats, OCR-need detection).
 - `scripts/chat_store.py` — JSON-file conversation persistence under
   `conversations/` (gitignored). The web UI and the OpenAI-compatible endpoint

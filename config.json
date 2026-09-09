@@ -10,14 +10,17 @@
   "llm_max_tokens": 4096,
   "retrieval_top_k": 10,
   "ingest_batch_size": 500,
-  "exclude": ["Leo Tolstoy"],
+  "exclude": [
+    "Leo Tolstoy"
+  ],
   "fiction_tags": [
     "Fiction",
     "Short Stories",
     "Literary"
   ],
   "ocr_enabled": false,
-  "ocr_backend": "rapidocr",
+  "ocr_merge": true,
+  "ocr_backend": "tesseract",
   "ocr_char_threshold": 50,
   "ocr_languages": [
     "en"
@@ -25,6 +28,10 @@
   "sets": {
     "library": {
       "path": "/path/to/your/library",
+      "kind": "local"
+    },
+    "nlp_books": {
+      "path": "/path/to/nlp/books",
       "kind": "local"
     }
   }

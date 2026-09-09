@@ -8,15 +8,16 @@ assistant treats it as fiction and will not present its content as fact.
 
 ```
 ┌─────────────┐   embeddings    ┌──────────────┐   retrieved   ┌────────────┐
-│ PDF/EPUB/MOBI│ ─────────────► │ Chroma vector │ ────────────► │  LLM 1     │
-│  library    │   (local)       │   store       │    context    │ (LM Studio)│
-└─────────────┘                 └──────────────┘               └────────────┘
+│ PDF/EPUB/MOBI│ ─────────────► │ Chroma vector │ ────────────► │  LLM API  │
+│  library    │   (local)       │   store       │    context    │ (local or  │
+└─────────────┘                 └──────────────┘               │  cloud)    │
+                                                               └────────────┘
 ```
 
 ## Quick start (new machine)
 
-Prereq: **Python 3.10+** on Linux, and **LM Studio** (or any OpenAI-compatible server)
-if you want to chat. **uv** is auto-installed on first run (or install manually:
+Prereq: **Python 3.10+** on Linux, and an **LLM API** (see below) if you want to chat.
+**uv** is auto-installed on first run (or install manually:
 `curl -LsSf https://astral.sh/uv/install.sh | sh`).
 
 ```bash
@@ -53,8 +54,10 @@ RAG_DEVICE=gpu ./run.sh
 The app has 4 tabs:
 
 1. **Setup** — pick your library folder (use the **Browse…** folder picker, or type a
-   path), set the embedding model, chunk sizes, LLM URL, OCR toggle. `Save config`
-   persists to `config.json`.
+   path), configure the **LLM API** and **embedding model** (with auto-download), and
+   tune chunk sizes / OCR. `Save config` persists to `config.json`. A **first-run
+   wizard** walks you through LLM API, embedding model, and library directories once on
+   a new machine (dismissible; the Setup tab stays editable).
 2. **Scan** — dry-run: counts files by type, classifies Fiction vs Non-Fiction from
    Calibre tags, and flags scanned PDFs that would need OCR. Nothing is indexed.
 3. **Ingest** — builds/updates the vector index. Runs in the background; a header pill
@@ -81,16 +84,59 @@ the embedding model; the GUI's `Force re-embed` does this per file too).
 
 | Key                  | Default                            | Meaning |
 |----------------------|------------------------------------|---------|
-| `embed_model`        | `intfloat/multilingual-e5-small`   | Sentence-Transformers model |
+| `embed_model`        | `intfloat/multilingual-e5-small`   | Sentence-Transformers model (pickable in the UI) |
 | `embed_device`       | `cpu`                              | `cpu` (GPU needs a big VRAM card) |
+| `embed_dim`          | `384`                              | embedding dimension (matched when re-indexing) |
 | `chunk_tokens`       | `330`                              | tokens per chunk (keep ≤ model max, e.g. 512 for e5) |
 | `chunk_overlap`      | `60`                               | overlap between chunks |
-| `llm_base_url`       | `http://localhost:1234/v1`         | LM Studio base URL |
+| `llm_base_url`       | `http://localhost:1234/v1`         | any OpenAI-compatible endpoint (LM Studio / llama.cpp / cloud) |
 | `llm_model`          | `default`                          | model id to request (the shipped `config.json` sets a concrete model) |
+| `llm_api_key`        | *(empty)*                          | API key for remote/cloud providers; empty = local server |
 | `retrieval_top_k`    | `10`                               | chunks retrieved per question |
 | `fiction_tags`       | `["Fiction","Short Stories","Literary"]` | Calibre tags that mark a book as fiction |
 | `ocr_enabled`        | `false`                            | OCR scanned PDFs (needs extra deps) |
 | `ocr_char_threshold` | `50`                               | min text chars before a PDF is "scanned" |
+
+## LLM API (any provider)
+
+The chat backend talks to an **OpenAI-compatible** endpoint over `llm_base_url`. This
+can be:
+
+- **Local LM Studio / llama.cpp** — leave the API key empty; a dummy key is used.
+- **Remote / cloud provider** — set `llm_base_url` to the provider's endpoint and enter
+  an `llm_api_key` (e.g. any OpenAI-compatible SaaS).
+
+In the **Setup** tab → *LLM API* panel you can test the connection and apply the
+URL/model/key. `/api/llm/status` reports reachability and the model list.
+
+### Self-hosting with `llama-server` (optional, future machines)
+
+If the `llama-server` binary is present on `$PATH`, the UI exposes a *Self-hosted*
+sub-panel that can **download a GGUF** (`Qwen3-1.7B-Q4_K_M`, ~1.1 GB) into `models/`,
+then **start/stop** a `llama-server` subprocess on port 8080. On machines without the
+binary this panel is hidden and inert — nothing is downloaded or launched.
+
+## Embedding model picker
+
+The **Setup** tab → *Embedding model* panel offers a tiered picker with auto-download
+(progress + estimated disk size). Custom Sentence-Transformers names are also accepted.
+
+- **CPU / 3 GB GPU**: `multilingual-e5-small` (current), `all-MiniLM-L6-v2`,
+  `bge-small-en-v1.5`, `mdbr-leaf-mt`, `Qwen3-Embedding-0.6B`.
+- **6 GB+ GPU**: `bge-m3`, `embeddinggemma-300m`, `BidirLM-1.7B-Embedding`,
+  `multilingual-e5-base` / `large`.
+
+Changing the embedding model requires re-indexing: the UI flags this, and you re-run
+ingest with **Force re-embed** (or delete `index/` + `manifest.db`). All listed models
+are full-dimension in v1 (MRL dimension reduction is deferred).
+
+## First-run wizard
+
+On first load (no `setup_complete` flag in `config.json`), a wizard walks through:
+1) **LLM API** (URL / model / optional key, with a test button), 2) **Embedding model**
+(tiered pick + download + device), 3) **Library directories** (edit/add/remove sets).
+**Finish** persists everything and sets `setup_complete: true`. It shows once and is
+dismissible ("Skip for now"); the Setup tab remains fully editable afterwards.
 
 ## Notes / limitations
 

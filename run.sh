@@ -86,13 +86,13 @@ SentenceTransformer(cfg.get("embed_model", "intfloat/multilingual-e5-small"), de
 print("Embedding model ready.")
 PY
 
-# 4. Check LM Studio is reachable (warn only)
+# 4. Check the LLM API is reachable (warn only)
 echo
 if curl -s -m 3 "$(python3 -c 'import json;print(json.load(open("config.json"))["llm_base_url"])')/models" >/dev/null 2>&1; then
-  echo "==> LM Studio: online (good)."
+  echo "==> LLM API: online (good)."
 else
-  echo "==> NOTE: LM Studio not detected. Chat tab needs it on the configured URL."
-  echo "    (Setup tab shows the exact URL; start LM Studio and enable its local server.)"
+  echo "==> NOTE: LLM API not detected on the configured URL."
+  echo "    (Setup tab configures it: local LM Studio/llama.cpp, or a remote/cloud provider.)"
 fi
 echo
 

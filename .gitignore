@@ -8,6 +8,8 @@ index/
 manifest.db
 *.db
 ingest.log
+ingest_nlp.log
+ocr.log
 server.log
 scan_results.json
 ocr_compare_report.json
@@ -15,6 +17,10 @@ ocr_compare_report.json
 cache/
 ocr/
 conversations/
+
+# Self-hosted LLM GGUF models (downloaded via the UI on future machines)
+models/
+llama-server.log
 
 # Local / machine-specific
 config.local.json

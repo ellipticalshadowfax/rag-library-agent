@@ -4,6 +4,8 @@
 import hashlib
 import json
 import os
+import random
+import re
 import signal
 import sqlite3
 import subprocess
@@ -285,6 +287,84 @@ def ocr_pdf_rapidocr(pdf_path: str, output_path: str, languages=["en"]):
         f.write("\n\n".join(all_text))
     return True
 
+
+def ocr_pdf_auto(pdf_path: str, output_path: str, languages=["en"], backend=None):
+    """Dispatch OCR to the configured backend (tesseract default, or rapidocr)."""
+    if backend == "rapidocr":
+        return ocr_pdf_rapidocr(pdf_path, output_path, languages)
+    return ocr_pdf_tesseract(pdf_path, output_path, languages)
+
+
+def ocr_pdf_tesseract(pdf_path: str, output_path: str, languages=["en"]) -> bool:
+    """OCR a scanned PDF with tesseract (via ocr_compare's parallel helper)."""
+    try:
+        import ocr_compare as OC
+    except Exception as e:
+        console.print(f"[yellow]ocr_compare import failed: {e}[/yellow]")
+        return False
+    if not OC._setup_tesseract(None, None):
+        console.print("[yellow]tesseract binary not available; install tesseract-ocr or set TESSERACT_BIN[/yellow]")
+        return False
+    lang = OC._tess_lang(languages)
+    ok = OC.ocr_full_tesseract(pdf_path, lang, Path(output_path))
+    console.print(f"[dim]  tesseract OCR {'ok' if ok else 'no text'}: {Path(pdf_path).name}[/dim]")
+    return ok
+
+
+def merge_text_into_pdf(pdf_path: str, text_path: str) -> bool:
+    """Write the OCR text from text_path back into pdf_path as an invisible text
+    layer so the PDF becomes searchable/extractable without changing its look.
+
+    Page markers "--- Page N ---" (written by ocr_pdf_rapidocr) attach each page's
+    text to the corresponding page. A backup of the original is kept next to the
+    OCR cache. Returns True on success.
+    """
+    def parse_pages(text: str) -> dict:
+        pages = {}
+        cur = None
+        buf = []
+        pat = re.compile(r"^--- Page (\d+) ---\s*$")
+        for line in text.splitlines():
+            m = pat.match(line)
+            if m:
+                if cur is not None:
+                    pages[cur] = "\n".join(buf).strip()
+                cur = int(m.group(1))
+                buf = []
+            else:
+                buf.append(line)
+        if cur is not None:
+            pages[cur] = "\n".join(buf).strip()
+        return pages
+
+    try:
+        text = open(text_path, encoding="utf-8", errors="replace").read()
+    except OSError:
+        return False
+    page_texts = parse_pages(text)
+    if not page_texts:
+        return False
+
+    try:
+        doc = fitz.open(pdf_path)
+        added = 0
+        for i in range(len(doc)):
+            txt = page_texts.get(i + 1, "")
+            if not txt.strip():
+                continue
+            page = doc[i]
+            r = page.rect + (-6, -6, 6, 6)
+            # render_mode 3 = invisible glyphs: searchable/copyable, not drawn.
+            page.insert_textbox(r, txt, fontsize=9.0, fontname="helv",
+                                render_mode=3, align=0)
+            added += 1
+        doc.save(pdf_path, incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
+        doc.close()
+        return added > 0
+    except Exception as e:
+        console.print(f"[red]merge_text_into_pdf failed for {pdf_path}: {e}[/red]")
+        return False
+
 # ─── Text Extraction ─────────────────────────────────────────────────────────
 
 def extract_text(fpath: Path, ext: str, ocr_cache: Path) -> tuple[str, dict]:
@@ -429,6 +509,7 @@ def ingest(target: str, set_name: str, cfg: dict, force: bool = False, only_path
     embed_model = cfg.get("embed_model", "BAAI/bge-m3")
     ocr_threshold = cfg.get("ocr_char_threshold", 50)
     ocr_enabled = cfg.get("ocr_enabled", False)
+    ocr_merge = cfg.get("ocr_merge", True)
     batch_size = int(cfg.get("ingest_batch_size", INGEST_BATCH_SIZE))
     exclude = cfg.get("exclude", [])
 
@@ -553,10 +634,16 @@ def ingest(target: str, set_name: str, cfg: dict, force: bool = False, only_path
                 ocr_out = ocr_cache / (fpath.stem + ".txt")
                 if not ocr_out.exists():
                     print(f"[{idx}/{total}] OCR: {fpath.name}", flush=True)
-                    ocr_pdf_rapidocr(str(fpath), str(ocr_out), cfg.get("ocr_languages", ["en"]))
+                    ocr_pdf_auto(str(fpath), str(ocr_out), cfg.get("ocr_languages", ["en"]),
+                                 cfg.get("ocr_backend", "tesseract"))
                     finfo["ocr_status"] = "done"
                 else:
                     finfo["ocr_status"] = "cached"
+                # Auto write-back: merge the OCR text into the original PDF so it
+                # becomes searchable/extractable without an OCR re-run next time.
+                if ocr_merge:
+                    merged = merge_text_into_pdf(str(fpath), str(ocr_out))
+                    print(f"[{idx}/{total}] {'merged' if merged else 'merge-failed'} OCR into {fpath.name}", flush=True)
 
             # Extract text
             text, text_meta = extract_text(fpath, ext, ocr_cache)
