@@ -16,11 +16,13 @@ assistant treats it as fiction and will not present its content as fact.
 ## Quick start (new machine)
 
 Prereq: **Python 3.10+** on Linux, and **LM Studio** (or any OpenAI-compatible server)
-if you want to chat.
+if you want to chat. **uv** is auto-installed on first run (or install manually:
+`curl -LsSf https://astral.sh/uv/install.sh | sh`).
 
 ```bash
 cd rag-web-chat
-./run.sh
+./run.sh                    # CPU install (default, no CUDA libs needed)
+RAG_DEVICE=gpu ./run.sh     # GPU install (NVIDIA driver + VRAM required)
 ```
 
 That one command creates a virtualenv, installs dependencies, downloads the embedding
@@ -30,9 +32,16 @@ If `./run.sh` isn't executable yet: `chmod +x run.sh`
 
 ### Manual / troubleshooting
 ```bash
-# set up env explicitly
+# set up env explicitly (CPU install — two steps required: torch CPU first)
 python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
+uv pip install torch==2.14.0+cpu \
+  --index-url https://download.pytorch.org/whl/cpu
+uv pip install -r requirements.txt \
+  --extra-index-url https://pypi.org/simple
+
+# GPU install (NVIDIA driver + VRAM required)
+RAG_DEVICE=gpu ./run.sh
+# or manually: uv pip install -r requirements-gpu.txt
 
 # start the web app
 .venv/bin/python scripts/server.py
@@ -85,6 +94,13 @@ the embedding model; the GUI's `Force re-embed` does this per file too).
 
 ## Notes / limitations
 
+- **CPU vs GPU install**: `RAG_DEVICE=gpu` installs CUDA-capable wheels (`torch` with
+  CUDA, `nvidia-*` libraries). **However, the app currently forces CPU at runtime**
+  (`CUDA_VISIBLE_DEVICES=""` is hardcoded), so embeddings run on CPU regardless of which
+  install was used. The GPU install provisions the libraries for future use only — no
+  GPU speedup today.
+- **OCR is CPU-only** in both install modes — it uses `onnxruntime` (CPU), not
+  `onnxruntime-gpu`. GPU acceleration for OCR is not currently supported.
 - **Scanned PDFs**: without OCR enabled they are skipped and recorded (they show up in
   the Scan tab). Enabling OCR requires installing `rapidocr-onnxruntime` (already in
   `requirements.txt`) — it is faster but still much slower than text PDFs.
