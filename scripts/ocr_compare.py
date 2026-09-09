@@ -347,6 +347,8 @@ def main():
     ap.add_argument("--sample-only", action="store_true",
                     help="Only run the 5-page comparison; skip full-file OCR")
     ap.add_argument("--force", action="store_true", help="Re-OCR files that already have a cache")
+    ap.add_argument("--force-tesseract", action="store_true",
+                    help="Force tesseract for all files regardless of routing")
     ap.add_argument("--tess-threshold", type=float, default=0.50)
     ap.add_argument("--rapid-threshold", type=float, default=0.45)
     ap.add_argument("--workers", type=int, default=8, help="Parallel OCR page workers")
@@ -466,10 +468,13 @@ def main():
                     p.unlink(missing_ok=True)
             continue
 
-        if decision == "too_bad":
+        if decision == "too_bad" and not args.force_tesseract:
             print(f"    -> {decision} ({reason})", flush=True)
             continue
 
+        if args.force_tesseract:
+            decision = "tesseract"
+            reason = "forced tesseract"
         print(f"    -> full OCR with {decision}...", flush=True)
         ok = False
         if decision == "tesseract":
