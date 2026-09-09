@@ -9,6 +9,8 @@
   "llm_temperature": 0.3,
   "llm_max_tokens": 4096,
   "retrieval_top_k": 10,
+  "ingest_batch_size": 500,
+  "exclude": ["Leo Tolstoy"],
   "fiction_tags": [
     "Fiction",
     "Short Stories",

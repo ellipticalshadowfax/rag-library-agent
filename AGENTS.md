@@ -18,6 +18,9 @@ repo. Do not introduce them back in.
 - `scripts/ingest.py` — CLI indexer: walks a directory, extracts text, chunks,
   embeds (E5 prefixes), upserts into ChromaDB. Writes `manifest.db`.
 - `scripts/scan.py` — CLI dry-run scanner (stats, OCR-need detection).
+- `scripts/chat_store.py` — JSON-file conversation persistence under
+  `conversations/` (gitignored). The web UI and the OpenAI-compatible endpoint
+  use it to store/manage multiple chats.
 - `web/index.html` — single-file SPA frontend (Setup/Scan/Ingest/Chat tabs,
   folder-picker dialog, global ingest-activity pill).
 - `config.json` — app config (embed model, LLM URL/model, chunking, sets).
@@ -42,8 +45,12 @@ repo. Do not introduce them back in.
   poll. Never let `finished`/`completed`/`pid` go stale across runs. Progress is
   parsed from the last `[x/y] done=…` line in `ingest.log`.
 - **Oversized files**: Chroma upserts have a hard batch limit (~5461). `ingest.py`
-  skips any single file chunking into more than `MAX_CHUNKS_PER_FILE` (default 5000,
-  override `INGEST_MAX_CHUNKS`) with a `SKIP (oversized…)` message + manifest record.
+  always embeds/upserts in batches (`ingest_batch_size`, default 500) so any single
+  file — including huge omnibuses — is processed across multiple calls instead of
+  skipped. Files chunking into more than `MAX_CHUNKS_PER_FILE` (default 5000,
+  override `INGEST_MAX_CHUNKS`) are flagged as `BIG` and batched; a cheap early
+  estimate (chars ÷ tokens) warns before the chunk/embed pass. The collection/set
+  name `library` is used as a default identifier throughout — that is fine to keep.
 - **Embedder prefixes**: E5 models need `passage:` on index and `query:` on retrieve.
   Ingest encodes with `prompt_name="passage"`; retrieval uses `prompt_name="query"`.
 - **Deterministic chunk IDs**: `sha256(f"{rel_path}:{index}")` — re-runs upsert in

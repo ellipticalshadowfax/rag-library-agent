@@ -25,6 +25,7 @@ RAG_ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS_DIR = RAG_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
+import chat_store
 import ingest as ING
 import scan as SCAN
 
@@ -303,9 +304,10 @@ def api_config_set():
     cfg = load_cfg()
     # Only allow whitelisted keys to update
     allowed = {
-        "embed_model", "chunk_tokens", "chunk_overlap", "llm_base_url",
-        "llm_model", "llm_temperature", "llm_max_tokens", "retrieval_top_k",
-        "fiction_tags", "ocr_enabled", "ocr_languages", "embed_device",
+        "embed_model", "embed_device", "chunk_tokens", "chunk_overlap",
+        "llm_base_url", "llm_model", "llm_temperature", "llm_max_tokens",
+        "retrieval_top_k", "fiction_tags", "ocr_enabled", "ocr_languages",
+        "ingest_batch_size",
     }
     for k in allowed:
         if k in data:
@@ -391,42 +393,49 @@ def api_ingest_control():
     return jsonify({"ok": False, "message": "Unknown action."}), 400
 
 
-@app.route("/api/chat", methods=["POST"])
-def api_chat():
-    data = request.get_json(force=True) or {}
-    set_name = data.get("set", "library")
-    query = data.get("query", "").strip()
-    top_k = int(data.get("top_k", load_cfg().get("retrieval_top_k", 10)))
-    filter_kind = data.get("filter_kind")
+# Bound the prompt size: LM Studio's default window is 8192 tokens and the
+# Qwen tokenizer is ~3 tokens/word. cap scored hits by words so the total
+# prompt stays well under any default context window.
+CONTEXT_WORD_BUDGET = 1500
+CHUNK_WORD_CAP = 240
 
-    if not query:
-        return jsonify({"error": "No question"}), 400
 
+def default_set_name():
+    """Best default collection name for chat when none is specified."""
+    cfg = load_cfg()
+    if cfg.get("sets"):
+        return next(iter(cfg["sets"]))
+    return "library"
+
+
+def _prepare_rag(set_name, query, top_k, filter_kind, history=None):
+    """Run retrieval and build the upstream LLM message list.
+
+    Returns a dict:
+      {"error": msg}                        on failure
+      {"answer": "...", "sources": []}      when nothing relevant was found
+      {"messages": [...], "sources": [...], "fiction_only": bool}
+    """
     if ingest_active():
-        return jsonify({"error": "Indexing is in progress — chat is paused until "
-                                "it finishes. Check the Ingest tab for progress."}), 409
-
+        return {"error": "Indexing is in progress — chat is paused until it "
+                         "finishes. Check the Ingest tab for progress."}
+    cfg = load_cfg()
     try:
         collection = get_chat_collection(set_name)
     except SystemExit:
-        return jsonify({"error": f"Collection '{set_name}' not found. Run ingestion first."}), 404
-
+        return {"error": f"Collection '{set_name}' not found. Run ingestion first."}
     if collection.count() == 0:
-        return jsonify({"error": f"Collection '{set_name}' is empty."}), 404
+        return {"error": f"Collection '{set_name}' is empty."}
 
-    # Bound the prompt size: LM Studio's default window is 8192 tokens and the
-    # Qwen tokenizer is ~3 tokens/word. cap scored hits by words so the total
-    # prompt stays well under any default context window.
-    CONTEXT_WORD_BUDGET = 1500
-    CHUNK_WORD_CAP = 240
     top_k = min(top_k, 8)
     embedder = get_chat_embedder()
     agent_mod = __import__("agent", fromlist=["retrieve", "build_context", "SYSTEM_PROMPT"])
     hits = agent_mod.retrieve(query, embedder, collection, top_k=top_k,
-                              filter_kind=filter_kind, cfg=load_cfg())
+                              filter_kind=filter_kind, cfg=cfg)
 
     if not hits:
-        return jsonify({"answer": "No relevant documents found.", "sources": []})
+        return {"answer": "No relevant documents found.", "sources": [],
+                "fiction_only": False}
 
     # Keep the highest-scoring hits that fit the word budget
     kept, used = [], 0
@@ -445,19 +454,50 @@ def api_chat():
     if fiction_hits and not nonfiction_hits:
         user_msg += "\n\nNOTE: ALL retrieved sources are FICTION. Do NOT present them as factual. State clearly that these are fiction works."
 
+    messages = [{"role": "system", "content": agent_mod.SYSTEM_PROMPT}]
+    if history:
+        for m in history:
+            if m.get("role") in ("user", "assistant") and isinstance(m.get("content"), str):
+                messages.append({"role": m["role"], "content": m["content"]})
+    messages.append({"role": "user", "content": user_msg})
+
+    sources = []
+    for h in hits:
+        m = h["metadata"]
+        sources.append({
+            "title": m.get("title", "?"),
+            "source": m.get("source", "?"),
+            "kind": m.get("kind", "unknown"),
+            "tags": m.get("tags", "[]"),
+            "score": round(1 - h["distance"], 3),
+            "snippet": h["document"][:300],
+        })
+
+    return {"messages": messages, "sources": sources,
+            "fiction_only": bool(fiction_hits and not nonfiction_hits)}
+
+
+def run_rag_chat(set_name, query, top_k=None, filter_kind=None, history=None):
+    """Blocking RAG chat. Returns (payload, http_code)."""
+    if top_k is None:
+        top_k = load_cfg().get("retrieval_top_k", 10)
+    payload = _prepare_rag(set_name, query, top_k, filter_kind, history)
+    if "error" in payload:
+        return payload, 409 if "paused" in payload["error"] else 404
+    if "answer" in payload and "messages" not in payload:
+        return payload, 200
+
+    cfg = load_cfg()
     client = get_chat_client()
     answer = ""
     last_err = None
     for attempt in range(2):
         try:
             response = client.chat.completions.create(
-                model=load_cfg().get("llm_model", "default"),
-                messages=[
-                    {"role": "system", "content": agent_mod.SYSTEM_PROMPT},
-                    {"role": "user", "content": user_msg},
-                ],
-                temperature=load_cfg().get("llm_temperature", 0.3),
-                max_tokens=load_cfg().get("llm_max_tokens", 2048),
+                model=cfg.get("llm_model", "default"),
+                messages=payload["messages"],
+                temperature=cfg.get("llm_temperature", 0.3),
+                max_tokens=cfg.get("llm_max_tokens", 2048),
             )
             msg = response.choices[0].message
             answer = (msg.content or "").strip()
@@ -476,23 +516,215 @@ def api_chat():
             time.sleep(1)
 
     if not answer:
-        return jsonify({"error": f"LLM returned no usable answer. {last_err}. "
-                                f"Is LMStudio running with a model loaded?",
-                        "sources": []}), 500
+        return ({"error": f"LLM returned no usable answer. {last_err}. "
+                          f"Is LMStudio running with a model loaded?",
+                 "sources": []}), 500
 
-    sources = []
-    for h in hits:
-        m = h["metadata"]
-        sources.append({
-            "title": m.get("title", "?"),
-            "source": m.get("source", "?"),
-            "kind": m.get("kind", "unknown"),
-            "tags": m.get("tags", "[]"),
-            "score": round(1 - h["distance"], 3),
-            "snippet": h["document"][:300],
-        })
+    return {"answer": answer, "sources": payload["sources"],
+            "fiction_only": payload["fiction_only"]}, 200
 
-    return jsonify({"answer": answer, "sources": sources, "fiction_only": bool(fiction_hits and not nonfiction_hits)})
+
+@app.route("/api/chat", methods=["POST"])
+def api_chat():
+    data = request.get_json(force=True) or {}
+    set_name = data.get("set", "library")
+    query = data.get("query", "").strip()
+    if not query:
+        return jsonify({"error": "No question"}), 400
+    top_k = int(data.get("top_k", load_cfg().get("retrieval_top_k", 10)))
+    filter_kind = data.get("filter_kind")
+    result, code = run_rag_chat(set_name, query, top_k, filter_kind)
+
+    conv_id = data.get("conversation_id")
+    if conv_id and "error" not in result:
+        chat_store.add_message(conv_id, "user", query)
+        chat_store.add_message(conv_id, "assistant", result.get("answer", ""),
+                               {"sources": result.get("sources", []),
+                                "fiction_only": result.get("fiction_only", False)})
+    return jsonify(result), code
+
+
+# ── OpenAI-compatible endpoints (for external AI chat clients) ───────────────
+
+@app.route("/v1/models")
+def api_openai_models():
+    cfg = load_cfg()
+    model_id = cfg.get("llm_model", "default")
+    return jsonify({
+        "object": "list",
+        "data": [{"id": model_id, "object": "model", "owned_by": "rag-web-chat"}],
+    })
+
+
+@app.route("/v1/chat/completions", methods=["POST"])
+def api_openai_chat():
+    data = request.get_json(force=True) or {}
+    if ingest_active():
+        return jsonify({"error": {"message": "Indexing is in progress — chat is paused.",
+                                  "type": "server_error", "code": "ingest_busy"}}), 503
+
+    messages = data.get("messages") or []
+    user_msgs = [m for m in messages
+                 if m.get("role") == "user" and isinstance(m.get("content"), str)
+                 and m.get("content", "").strip()]
+    if not user_msgs:
+        return jsonify({"error": {"message": "No user message found.",
+                                  "type": "invalid_request_error"}}), 400
+    query = user_msgs[-1]["content"].strip()
+    history = messages[:-1]
+
+    cfg = load_cfg()
+    set_name = data.get("collection") or data.get("set") or data.get("user") \
+        or default_set_name()
+    top_k = int(data.get("top_k", cfg.get("retrieval_top_k", 10)))
+    filter_kind = data.get("filter_kind")
+    model = data.get("model") or cfg.get("llm_model", "default")
+
+    stream = bool(data.get("stream", False))
+    if stream:
+        return Response(
+            _sse_wrap(set_name, query, history, top_k, filter_kind, model),
+            mimetype="text/event-stream",
+            headers={"Cache-Control": "no-cache",
+                     "X-Accel-Buffering": "no",
+                     "Access-Control-Allow-Origin": "*"},
+        )
+
+    payload = _prepare_rag(set_name, query, top_k, filter_kind, history)
+    if "error" in payload:
+        code = 503 if "paused" in payload["error"] else 404
+        return jsonify({"error": {"message": payload["error"],
+                                  "type": "server_error"}}), code
+    if "answer" in payload and "messages" not in payload:
+        return _openai_response(payload["answer"], model, payload["sources"])
+
+    cfg = load_cfg()
+    client = get_chat_client()
+    answer = ""
+    last_err = None
+    for attempt in range(2):
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=payload["messages"],
+                temperature=cfg.get("llm_temperature", 0.3),
+                max_tokens=cfg.get("llm_max_tokens", 2048),
+            )
+            msg = response.choices[0].message
+            answer = (msg.content or "").strip()
+            if not answer and getattr(msg, "reasoning_content", None):
+                answer = msg.reasoning_content.strip()
+            if answer:
+                break
+            last_err = "model returned an empty response"
+        except Exception as e:
+            last_err = str(e)
+            if "Failed to load model" in str(e):
+                break
+            time.sleep(1)
+    if not answer:
+        return jsonify({"error": {"message": f"LLM returned no usable answer. {last_err}.",
+                                  "type": "server_error"}}), 500
+
+    return _openai_response(answer, model, payload["sources"])
+
+
+def _openai_response(content, model, sources):
+    return jsonify({
+        "id": "chatcmpl-" + os.urandom(6).hex(),
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": content},
+            "finish_reason": "stop",
+        }],
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        "sources": sources,
+    })
+
+
+def _sse_wrap(set_name, query, history, top_k, filter_kind, model):
+    import json as _json
+    payload = _prepare_rag(set_name, query, top_k, filter_kind, history)
+    if "error" in payload:
+        yield "event: error\n"
+        yield f"data: {_json.dumps({'error': payload['error']})}\n\n"
+        yield "data: [DONE]\n\n"
+        return
+    if "answer" in payload and "messages" not in payload:
+        text = payload["answer"]
+        for word in text.split(" "):
+            yield "data: " + _json.dumps({
+                "choices": [{"delta": {"content": word + " "}}]}) + "\n\n"
+        yield "data: [DONE]\n\n"
+        return
+
+    cfg = load_cfg()
+    client = get_chat_client()
+    stream = client.chat.completions.create(
+        model=model,
+        messages=payload["messages"],
+        temperature=cfg.get("llm_temperature", 0.3),
+        max_tokens=cfg.get("llm_max_tokens", 2048),
+        stream=True,
+    )
+    for chunk in stream:
+        delta = chunk.choices[0].delta if chunk.choices else None
+        text = getattr(delta, "content", None) if delta else None
+        if text:
+            yield "data: " + _json.dumps({
+                "choices": [{"delta": {"content": text}}]}) + "\n\n"
+    yield "data: [DONE]\n\n"
+
+
+# ── Conversation management (for external clients and the web UI) ────────────
+
+@app.route("/api/conversations")
+def api_convs_list():
+    return jsonify(chat_store.list_conversations())
+
+
+@app.route("/api/conversations", methods=["POST"])
+def api_convs_create():
+    data = request.get_json(force=True) or {}
+    conv = chat_store.create_conversation(title=data.get("title"),
+                                          set=data.get("set", ""))
+    return jsonify(conv), 201
+
+
+@app.route("/api/conversations/<cid>")
+def api_convs_get(cid):
+    conv = chat_store.get_conversation(cid)
+    if not conv:
+        return jsonify({"error": "Not found"}), 404
+    return jsonify(conv)
+
+
+@app.route("/api/conversations/<cid>", methods=["PATCH"])
+def api_convs_update(cid):
+    data = request.get_json(force=True) or {}
+    conv = chat_store.update_conversation(cid, title=data.get("title"),
+                                          set=data.get("set"))
+    if not conv:
+        return jsonify({"error": "Not found"}), 404
+    return jsonify(conv)
+
+
+@app.route("/api/conversations/<cid>", methods=["DELETE"])
+def api_convs_delete(cid):
+    if chat_store.delete_conversation(cid):
+        return jsonify({"ok": True})
+    return jsonify({"error": "Not found"}), 404
+
+
+@app.route("/api/conversations/<cid>/clear", methods=["POST"])
+def api_convs_clear(cid):
+    conv = chat_store.clear_conversation(cid)
+    if not conv:
+        return jsonify({"error": "Not found"}), 404
+    return jsonify(conv)
 
 
 @app.route("/api/collections")

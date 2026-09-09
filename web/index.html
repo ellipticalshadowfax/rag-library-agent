@@ -87,6 +87,16 @@
   .fiction-banner { background: rgba(255,122,195,.08); border: 1px solid var(--fiction); color: var(--fiction); padding: 10px 14px; border-radius: 8px; font-size: 13px; }
   #chatBlocked { display: none; margin: 12px 0 0; padding: 10px 14px; border-radius: 8px; font-size: 13px; color: var(--warn); border: 1px solid var(--warn); background: rgba(246,196,83,.06); }
   #chatBlocked.show { display: block; }
+  .chat-layout { display: flex; gap: 16px; align-items: stretch; }
+  .chat-sidebar { width: 250px; flex-shrink: 0; display: flex; flex-direction: column; gap: 8px; }
+  .chat-sidebar .btn { width: 100%; }
+  #convList { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; overflow-y: auto; flex: 1; }
+  .conv-item { display: flex; align-items: center; gap: 6px; padding: 9px 11px; cursor: pointer; border-bottom: 1px solid var(--border); font-size: 13px; color: var(--text); }
+  .conv-item:hover { background: var(--panel2); }
+  .conv-item.active { background: var(--panel2); box-shadow: inset 2px 0 0 var(--accent); }
+  .conv-item .t { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .conv-item .del { color: var(--muted); font-size: 14px; padding: 0 4px; border-radius: 4px; cursor: pointer; }
+  .conv-item .del:hover { color: var(--err); }
   .hidden { display: none !important; }
   .spinner { display: inline-block; width: 13px; height: 13px; border: 2px solid rgba(255,255,255,.3); border-top-color: #fff; border-radius: 50%; animation: spin .7s linear infinite; vertical-align: -2px; margin-right: 6px; }
   @keyframes spin { to { transform: rotate(360deg); } }
@@ -125,15 +135,15 @@
   <span class="small muted" id="curveInfo"></span>
 </header>
 <nav>
-  <button class="active" data-tab="tab-setup">Setup</button>
+  <button data-tab="tab-setup">Setup</button>
   <button data-tab="tab-scan">Scan</button>
   <button data-tab="tab-ingest">Ingest</button>
-  <button data-tab="tab-chat">Chat</button>
+  <button class="active" data-tab="tab-chat">Chat</button>
 </nav>
 <main>
 
   <!-- ═══ SETUP ═══ -->
-  <section class="tab active" id="tab-setup">
+  <section class="tab" id="tab-setup">
     <div class="panel">
       <h3>Document source</h3>
       <label>Library / document directory</label>
@@ -150,12 +160,28 @@
           <input type="text" id="cfgEmbedModel">
         </div>
         <div>
+          <label>Embedding device</label>
+          <select id="cfgEmbedDevice">
+            <option value="cpu">CPU</option>
+            <option value="gpu">GPU (CUDA)</option>
+            <option value="mps">MPS (Apple Silicon)</option>
+          </select>
+        </div>
+        <div>
           <label>LLM base URL (LM Studio)</label>
           <input type="text" id="cfgLlmUrl">
         </div>
         <div>
           <label>LLM model id</label>
           <input type="text" id="cfgLlmModel" placeholder="default">
+        </div>
+        <div>
+          <label>LLM temperature</label>
+          <input type="number" id="cfgLlmTemp" min="0" max="2" step="0.1">
+        </div>
+        <div>
+          <label>LLM max tokens</label>
+          <input type="number" id="cfgLlmMaxTokens" min="64">
         </div>
         <div>
           <label>Chunk tokens</label>
@@ -170,8 +196,20 @@
           <input type="number" id="cfgTopK" min="1" max="50">
         </div>
         <div>
+          <label>Ingest batch size</label>
+          <input type="number" id="cfgBatchSize" min="1" max="5000">
+        </div>
+        <div>
           <label>OCR enabled (.pdf scanned files)</label>
           <select id="cfgOcr"><option value="false">No (skip scanned PDFs)</option><option value="true">Yes (slower)</option></select>
+        </div>
+        <div>
+          <label>OCR languages (comma-separated)</label>
+          <input type="text" id="cfgOcrLanguages" placeholder="en">
+        </div>
+        <div>
+          <label>Fiction tags (comma-separated, matched against Calibre tags)</label>
+          <input type="text" id="cfgFictionTags" placeholder="Fiction, Short Stories, Literary">
         </div>
       </div>
       <div class="btn-row">
@@ -254,10 +292,15 @@
   </section>
 
   <!-- ═══ CHAT ═══ -->
-  <section class="tab" id="tab-chat">
+  <section class="tab active" id="tab-chat">
+    <div class="chat-layout">
+      <aside class="chat-sidebar">
+        <button class="btn" id="btnNewChat">+ New chat</button>
+        <div id="convList"><div class="muted small" style="padding:10px">(no chats yet)</div></div>
+      </aside>
     <div class="panel chat-panel">
       <div class="chat-toolbar">
-        <h3>Ask your library</h3>
+        <h3 id="chatTitle">Ask your library</h3>
         <button class="btn" id="btnClearChat" title="Clear conversation">Clear chat</button>
       </div>
       <div class="grid">
@@ -284,6 +327,7 @@
         </div>
         <button class="btn" id="btnAsk">Ask</button>
       </div>
+    </div>
     </div>
   </section>
 
@@ -323,7 +367,7 @@
 const $ = s => document.querySelector(s);
 const api = {
   get: (p) => fetch(p).then(r => r.json()),
-  post: (p, body) => fetch(p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) }).then(r => r.json()),
+  post: (p, body, method = 'POST') => fetch(p, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) }).then(r => r.json()),
 };
 
 function toast(msg, ms = 3500) {
@@ -431,30 +475,44 @@ async function refreshIngest() {
   pill.onclick = () => goTab('tab-ingest');
 }
 setInterval(refreshIngest, 2500);
+refreshChatSets();
 
 // ── Config load/save ──
 async function loadConfig() {
   const c = await api.get('/api/config');
   $('#cfgEmbedModel').value = c.embed_model || '';
+  $('#cfgEmbedDevice').value = c.embed_device || 'cpu';
   $('#cfgLlmUrl').value = c.llm_base_url || '';
   $('#cfgLlmModel').value = c.llm_model || '';
+  $('#cfgLlmTemp').value = c.llm_temperature ?? 0.3;
+  $('#cfgLlmMaxTokens').value = c.llm_max_tokens || 2048;
   $('#cfgChunkTokens').value = c.chunk_tokens || 330;
   $('#cfgChunkOverlap').value = c.chunk_overlap || 60;
   $('#cfgTopK').value = c.retrieval_top_k || 10;
+  $('#cfgBatchSize').value = c.ingest_batch_size || 500;
   $('#cfgOcr').value = String(c.ocr_enabled || false);
+  $('#cfgOcrLanguages').value = (c.ocr_languages || ['en']).join(', ');
+  $('#cfgFictionTags').value = (c.fiction_tags || ['Fiction', 'Short Stories', 'Literary']).join(', ');
   $('#curveInfo').textContent = 'embeddings: ' + (c.embed_model || '');
 }
 loadConfig();
 
 $('#btnSaveConfig').onclick = async () => {
+  const splitList = s => s.split(',').map(x => x.trim()).filter(Boolean);
   const body = {
     embed_model: $('#cfgEmbedModel').value.trim(),
+    embed_device: $('#cfgEmbedDevice').value,
     llm_base_url: $('#cfgLlmUrl').value.trim(),
     llm_model: $('#cfgLlmModel').value.trim(),
+    llm_temperature: parseFloat($('#cfgLlmTemp').value),
+    llm_max_tokens: parseInt($('#cfgLlmMaxTokens').value) || 2048,
     chunk_tokens: parseInt($('#cfgChunkTokens').value) || 330,
     chunk_overlap: parseInt($('#cfgChunkOverlap').value) || 60,
     retrieval_top_k: parseInt($('#cfgTopK').value) || 10,
+    ingest_batch_size: parseInt($('#cfgBatchSize').value) || 500,
     ocr_enabled: $('#cfgOcr').value === 'true',
+    ocr_languages: splitList($('#cfgOcrLanguages').value) || ['en'],
+    fiction_tags: splitList($('#cfgFictionTags').value) || ['Fiction', 'Short Stories', 'Literary'],
   };
   const r = await api.post('/api/config', body);
   toast(r.ok ? 'Config saved.' : 'Save failed.');
@@ -605,15 +663,92 @@ async function refreshCollections(silent) {
 $('#btnRefreshCollections').onclick = () => refreshCollections();
 
 // ── Chat ──
+let currentConv = null;   // conversation id, or null for an unsaved new chat
+
 async function refreshChatSets() {
   let cols;
   try { cols = await api.get('/api/collections'); } catch (e) { return; }
   const sel = $('#chatSet');
+  const cur = sel.value;
   sel.innerHTML = cols.map(c => `<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)} (${c.count})</option>`).join('');
+  if (cur && [...sel.options].some(o => o.value === cur)) sel.value = cur;
 }
-function chatTime() {
-  return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+function chatTime(ts) {
+  const d = ts ? new Date(ts * 1000) : new Date();
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
+
+// ── Conversation sidebar ──
+async function loadConvs() {
+  let list;
+  try { list = await api.get('/api/conversations'); } catch (e) { return; }
+  renderConvs(list || []);
+}
+function renderConvs(list) {
+  const box = $('#convList');
+  if (!list.length) { box.innerHTML = '<div class="muted small" style="padding:10px">(no chats yet)</div>'; return; }
+  box.innerHTML = '';
+  for (const cv of list) {
+    const item = el('div', 'conv-item' + (currentConv === cv.id ? ' active' : ''));
+    item.appendChild(el('span', 't', escapeHtml(cv.title)));
+    const del = el('span', 'del', '&#10005;');
+    del.title = 'Delete chat';
+    del.onclick = (ev) => { ev.stopPropagation(); deleteConv(cv.id); };
+    item.appendChild(del);
+    item.onclick = () => openConv(cv.id);
+    box.appendChild(item);
+  }
+}
+function newChat() {
+  currentConv = null;
+  $('#chatTitle').textContent = 'Ask your library';
+  $('#chatOut').innerHTML = '';
+  showChatEmpty();
+  renderConvs();
+}
+async function deleteConv(id) {
+  if (!confirm('Delete this chat permanently?')) return;
+  await api.post('/api/conversations/' + id, {}, 'DELETE');
+  if (currentConv === id) newChat();
+  loadConvs();
+}
+async function openConv(id) {
+  const conv = await api.get('/api/conversations/' + id);
+  if (!conv || conv.error) return;
+  currentConv = id;
+  $('#chatTitle').textContent = conv.title || 'Conversation';
+  const sel = $('#chatSet');
+  if (conv.set && [...sel.options].some(o => o.value === conv.set)) sel.value = conv.set;
+  renderConvMessages(conv);
+  renderConvs();
+}
+function renderConvMessages(conv) {
+  const out = $('#chatOut');
+  out.innerHTML = '';
+  const msgs = conv.messages || [];
+  if (!msgs.length) { showChatEmpty(); return; }
+  for (const m of msgs) {
+    if (m.role === 'user') {
+      out.appendChild(el('div', 'chat-msg user', `<div class="who">you <span class="when">${chatTime(m.ts)}</span></div>${escapeHtml(m.content)}`));
+    } else {
+      const box = el('div', 'chat-msg');
+      box.appendChild(el('div', 'who', `agent <span class="when">${chatTime(m.ts)}</span>`));
+      box.insertAdjacentHTML('beforeend', escapeHtml(m.content || '').replace(/\n/g, '<br>'));
+      const meta = m.meta || {};
+      if (meta.fiction_only) {
+        box.appendChild(el('div', 'fiction-banner', '&#9888; All retrieved sources are fictional works. The answer is drawn from fiction and must not be treated as fact.'));
+      }
+      const sources = meta.sources || [];
+      if (sources.length) {
+        box.appendChild(el('div', '', `<div class="small muted" style="margin:12px 0 4px">Sources (${sources.length}):</div>`));
+        for (const s of sources) box.appendChild(makeSource(s));
+      }
+      out.appendChild(box);
+    }
+  }
+  scrollChat();
+}
+$('#btnNewChat').onclick = newChat;
 function showChatEmpty() {
   if (!document.querySelector('#chatOut .chat-empty')) {
     $('#chatOut').appendChild(el('div', 'chat-empty', 'No messages yet. Ask a question about your documents.'));
@@ -657,13 +792,22 @@ function addAgentMsg(turn, html) {
   return box;
 }
 $('#btnAsk').onclick = ask;
-$('#btnClearChat').onclick = () => { clearChat(); toast('Conversation cleared.'); };
+$('#btnClearChat').onclick = async () => {
+  if (!currentConv) { newChat(); toast('Conversation cleared.'); return; }
+  const r = await api.post('/api/conversations/' + currentConv + '/clear');
+  if (r && !r.error) { openConv(currentConv); toast('Conversation cleared.'); }
+};
 $('#chatInput').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); ask(); } });
 async function ask() {
   const q = $('#chatInput').textContent.trim();
   const set = $('#chatSet').value;
   if (!q) return toast('Type a question.');
   if (!set) return toast('No collection yet — run Ingest first.');
+
+  if (!currentConv) {
+    const created = await api.post('/api/conversations', { title: 'New chat', set });
+    if (created && created.id) currentConv = created.id;
+  }
 
   const out = $('#chatOut');
   out.querySelector('.chat-empty')?.remove();
@@ -675,21 +819,28 @@ async function ask() {
   scrollChat();
 
   const thinking = addThinking(turn);
-  const r = await api.post('/api/chat', { query: q, set, filter_kind: $('#chatKind').value });
+  const r = await api.post('/api/chat', { query: q, set, filter_kind: $('#chatKind').value, conversation_id: currentConv });
   thinking.remove();
   if (r.error) {
     addAgentMsg(turn, `<span style="color:var(--err)">${escapeHtml(r.error)}</span>`);
     return;
   }
-  const box = addAgentMsg(turn, escapeHtml(r.answer).replace(/\n/g, '<br>'));
-  if (r.fiction_only) {
-    box.appendChild(el('div', 'fiction-banner', '&#9888; All retrieved sources are fictional works. The answer is drawn from fiction and must not be treated as fact.'));
-  }
-  if (r.sources && r.sources.length) {
-    box.appendChild(el('div', '', `<div class="small muted" style="margin:12px 0 4px">Sources (${r.sources.length}):</div>`));
-    for (const s of r.sources) box.appendChild(makeSource(s));
+  if (currentConv) {
+    const conv = await api.get('/api/conversations/' + currentConv);
+    if (conv && !conv.error) renderConvMessages(conv);
+    loadConvs();
+  } else {
+    const box = addAgentMsg(turn, escapeHtml(r.answer).replace(/\n/g, '<br>'));
+    if (r.fiction_only) {
+      box.appendChild(el('div', 'fiction-banner', '&#9888; All retrieved sources are fictional works. The answer is drawn from fiction and must not be treated as fact.'));
+    }
+    if (r.sources && r.sources.length) {
+      box.appendChild(el('div', '', `<div class="small muted" style="margin:12px 0 4px">Sources (${r.sources.length}):</div>`));
+      for (const s of r.sources) box.appendChild(makeSource(s));
+    }
   }
 }
+loadConvs();
 </script>
 </body>
 </html>

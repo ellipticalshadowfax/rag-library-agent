@@ -9,6 +9,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import random
 from pathlib import Path
 
 os.environ["CUDA_VISIBLE_DEVICES"] = ""  # Force CPU for embeddings
@@ -24,10 +25,14 @@ EXTENSIONS_TEXT = {".pdf", ".epub", ".mobi", ".djvu", ".txt", ".html", ".htm"}
 
 INGEST_LOCK = Path(__file__).resolve().parent.parent / ".ingest.lock"
 
-# Chroma upserts have a hard batch limit (~5461 embeddings). Files that chunk
-# into more than this are skipped with a clear message instead of failing the
-# whole embed pass after wasting minutes. Override with INGEST_MAX_CHUNKS.
+# Chroma upserts have a hard batch limit (~5461 embeddings per call). Instead of
+# failing the whole embed pass, we always upsert in batches of INGEST_BATCH_SIZE.
+# Files that chunk into more than MAX_CHUNKS_PER_FILE are flagged as "big" and
+# processed across multiple batches rather than skipped. Overrides:
+#   INGEST_BATCH_SIZE (per-call batch, default 500)
+#   INGEST_MAX_CHUNKS  (big-file notice threshold, default 5000)
 MAX_CHUNKS_PER_FILE = int(os.environ.get("INGEST_MAX_CHUNKS", "5000"))
+INGEST_BATCH_SIZE = int(os.environ.get("INGEST_BATCH_SIZE", "500"))
 
 
 # ─── Ingest lock (cross-process: blocks chat while indexing) ─────────────────
@@ -315,14 +320,26 @@ def extract_text(fpath: Path, ext: str, ocr_cache: Path) -> tuple[str, dict]:
                 def __init__(self):
                     super().__init__()
                     self.result = []
+                    self._skip = 0
+                def handle_starttag(self, tag, attrs):
+                    if tag in ("style", "script"):
+                        self._skip += 1
+                def handle_endtag(self, tag):
+                    if tag in ("style", "script"):
+                        self._skip = max(0, self._skip - 1)
                 def handle_data(self, data):
-                    self.result.append(data)
+                    if self._skip == 0:
+                        self.result.append(data)
                 def get_text(self):
                     return " ".join(self.result)
 
             book = epub.read_epub(str(fpath))
             texts = []
-            for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT):
+            # Some EPUBs tag their content as ITEM_UNKNOWN instead of ITEM_DOCUMENT,
+            # so match on filename rather than the (unreliable) type label.
+            docs = [i for i in book.get_items()
+                    if i.get_name().lower().endswith((".html", ".xhtml", ".htm"))]
+            for item in docs:
                 ext_parser = TextExtractor()
                 ext_parser.feed(item.get_content().decode("utf-8", errors="replace"))
                 t = ext_parser.get_text().strip()
@@ -412,6 +429,8 @@ def ingest(target: str, set_name: str, cfg: dict, force: bool = False, only_path
     embed_model = cfg.get("embed_model", "BAAI/bge-m3")
     ocr_threshold = cfg.get("ocr_char_threshold", 50)
     ocr_enabled = cfg.get("ocr_enabled", False)
+    batch_size = int(cfg.get("ingest_batch_size", INGEST_BATCH_SIZE))
+    exclude = cfg.get("exclude", [])
 
     if ocr_enabled:
         console.print("[dim]OCR: enabled[/dim]")
@@ -457,6 +476,8 @@ def ingest(target: str, set_name: str, cfg: dict, force: bool = False, only_path
 
             rel = str(fpath.relative_to(target_path))
             if only_path and only_path not in rel:
+                continue
+            if exclude and any(x in rel for x in exclude):
                 continue
 
             stat = fpath.stat()
@@ -506,10 +527,10 @@ def ingest(target: str, set_name: str, cfg: dict, force: bool = False, only_path
         manifest.close()
         return
 
-    # Process smallest files first so status shows quick wins early
-    files_to_process.sort(key=lambda f: f["size"])
+    # Process in random order so no single file's slow embed blocks progress
+    random.shuffle(files_to_process)
 
-    console.print(f"\n[bold]{len(files_to_process)} files to process (smallest first)[/bold]")
+    console.print(f"\n[bold]{len(files_to_process)} files to process (random order)[/bold]")
     console.print(f"  Fiction: {sum(1 for f in files_to_process if f['kind'] == 'fiction')}")
     console.print(f"  Non-fiction: {sum(1 for f in files_to_process if f['kind'] == 'nonfiction')}")
     console.print(f"  Need OCR: {sum(1 for f in files_to_process if f['ocr_status'] == 'needed')}")
@@ -546,6 +567,13 @@ def ingest(target: str, set_name: str, cfg: dict, force: bool = False, only_path
                 skipped += 1
                 continue
 
+            # Early, cheap estimate (chars / ~4 chars per token / chunk_tokens) so a
+            # huge file is flagged before the chunk/embed pass spends time on it.
+            est_chunks = max(1, len(text) // max(1, chunk_tokens * 4))
+            if est_chunks > MAX_CHUNKS_PER_FILE:
+                console.print(f"[yellow][{idx}/{total}] Big file detected: {fpath.name} "
+                              f"(~{est_chunks} chunks) - will process in batches[/yellow]")
+
             # Chunk
             chunks = chunk_text(text, chunk_tokens, chunk_overlap)
             if not chunks:
@@ -553,44 +581,42 @@ def ingest(target: str, set_name: str, cfg: dict, force: bool = False, only_path
                 skipped += 1
                 continue
 
-            # Oversized single file (e.g. complete-works omnibus) would blow past
-            # Chroma's upsert batch limit -> skip it and remember it in the manifest.
+            # Oversized single file (e.g. complete-works omnibus): handled below by
+            # processing across multiple embed/upsert batches instead of skipping.
             if len(chunks) > MAX_CHUNKS_PER_FILE:
-                print(f"[{idx}/{total}] SKIP (oversized: {len(chunks)} chunks > "
-                      f"{MAX_CHUNKS_PER_FILE}): {fpath.name}", flush=True)
-                manifest.upsert(rel, str(fpath), finfo["mtime"], finfo["size"],
-                               "skipped_oversize", finfo["kind"], finfo["tags"],
-                               finfo["title"], set_name)
-                skipped += 1
-                continue
+                print(f"[{idx}/{total}] BIG: {fpath.name} ({len(chunks)} chunks) - "
+                      f"processing in batches of {batch_size}", flush=True)
 
-            # Embed all chunks for this file in a single call
-            with torch.no_grad():
-                embeddings = embedder.encode(chunks, show_progress_bar=False,
-                                             convert_to_numpy=True,
-                                             prompt_name="passage").tolist()
+            # Embed + upsert in batches. Chroma has a hard per-call limit (~5461), so
+            # any file - including huge omnibuses - is processed across multiple calls
+            # instead of a single one. Chunk IDs stay deterministic (rel:index).
+            for start in range(0, len(chunks), batch_size):
+                batch = chunks[start:start + batch_size]
+                with torch.no_grad():
+                    embeddings = embedder.encode(batch, show_progress_bar=False,
+                                                 convert_to_numpy=True,
+                                                 prompt_name="passage").tolist()
 
-            all_ids = []
-            all_docs = []
-            all_embeddings = []
-            all_metadatas = []
-            for j, (chunk, emb) in enumerate(zip(chunks, embeddings)):
-                chunk_id = hashlib.sha256(f"{rel}:{j}".encode()).hexdigest()[:16]
-                all_ids.append(chunk_id)
-                all_docs.append(chunk)
-                all_embeddings.append(emb)
-                all_metadatas.append({
-                    "source": rel,
-                    "title": finfo["title"],
-                    "kind": finfo["kind"],
-                    "tags": json.dumps(finfo["tags"]),
-                    "set": set_name,
-                    "chunk_index": j,
-                    "total_chunks": len(chunks),
-                })
+                all_ids = []
+                all_docs = []
+                all_embeddings = []
+                all_metadatas = []
+                for j, (chunk, emb) in enumerate(zip(batch, embeddings)):
+                    abs_index = start + j
+                    chunk_id = hashlib.sha256(f"{rel}:{abs_index}".encode()).hexdigest()[:16]
+                    all_ids.append(chunk_id)
+                    all_docs.append(chunk)
+                    all_embeddings.append(emb)
+                    all_metadatas.append({
+                        "source": rel,
+                        "title": finfo["title"],
+                        "kind": finfo["kind"],
+                        "tags": json.dumps(finfo["tags"]),
+                        "set": set_name,
+                        "chunk_index": abs_index,
+                        "total_chunks": len(chunks),
+                    })
 
-            # Upsert into ChromaDB
-            if all_ids:
                 collection.upsert(
                     ids=all_ids,
                     documents=all_docs,

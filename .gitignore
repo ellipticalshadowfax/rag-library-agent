@@ -14,6 +14,7 @@ ocr_compare_report.json
 .ingest.lock
 cache/
 ocr/
+conversations/
 
 # Local / machine-specific
 config.local.json
