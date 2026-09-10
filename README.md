@@ -116,6 +116,36 @@ sub-panel that can **download a GGUF** (`Qwen3-1.7B-Q4_K_M`, ~1.1 GB) into `mode
 then **start/stop** a `llama-server` subprocess on port 8080. On machines without the
 binary this panel is hidden and inert — nothing is downloaded or launched.
 
+### Chat from LM Studio (MCP)
+
+Instead of using the web chat tab, you can chat in the **LM Studio** GUI and have
+its local model pull relevant passages from your library on demand. The library is
+exposed as a **Model Context Protocol (MCP) server** whose tools the model calls
+while answering:
+
+| Tool | Purpose |
+|------|---------|
+| `search_library(query, set_name, top_k, filter_kind)` | vector-search the index, return top excerpts (grounding) |
+| `summarize_work(title, set_name, top_k)` | retrieve one named work's chunks for a per-book summary |
+| `list_collections()` | list available sets + chunk counts |
+
+Embeddings run on CPU; the embedder and Chroma collection load once per process and
+stay cached. The index must exist first (`./run.sh` or `scripts/ingest.py`).
+
+1. Start the MCP server:
+   ```bash
+   ./run_mcp.sh            # stdio transport
+   ```
+2. In **LM Studio** → *Settings → MCP Servers → Add* a **Local** server:
+   - **Command**: the absolute path to `run_mcp.sh` (e.g. `/path/to/rag-web-chat/run_mcp.sh`)
+   - **Name**: `rag-library`
+3. In a chat, add a **Tool** (the `rag-library` tool) and ask away — the model will
+   call `search_library` and ground its answer in your books. Excerpts tagged
+   `[FICTION]` are flagged so the model won't present them as fact.
+
+To serve it remotely instead (e.g. another machine / LAN), start `./run_mcp.sh --http`
+and add it as a **Remote** MCP server at `http://127.0.0.1:8765/mcp`.
+
 ## Embedding model picker
 
 The **Setup** tab → *Embedding model* panel offers a tiered picker with auto-download
