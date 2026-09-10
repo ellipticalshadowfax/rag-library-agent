@@ -2,53 +2,74 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>RAG Library Agent</title>
-<style>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RAG Library Agent</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23262522'/%3E%3Cpath d='M16 6l2.6 5.9L24.8 14l-6.2 2.1L16 22l-2.6-5.9L7.2 14l6.2-2.1z' fill='%23D39B5E'/%3E%3C/svg%3E">
+  <style>
   :root {
     --bg: #262522; --panel: #302F2B; --panel2: #3A3934; --border: #4A4943;
     --text: #ECEBE6; --muted: #B9B7AF; --accent: #D39B5E; --accent2: #DEA970;
     --accent-hover: #DEA970;
     --ok: #3ddc84; --warn: #f6c453; --err: #f76c6c; --fiction: #ff7ac3;
+    --shadow-sm: 0 1px 2px rgba(0,0,0,.35);
+    --shadow-md: 0 6px 24px rgba(0,0,0,.45);
+    --shadow-lg: 0 14px 44px rgba(0,0,0,.55);
+    --ring: 0 0 0 3px rgba(211,155,94,.35);
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f3f1ec; --panel: #ffffff; --panel2: #efede8; --border: #d8d4cb;
+      --text: #24221d; --muted: #6f6b61; --accent: #b5712f; --accent2: #c98a45;
+      --accent-hover: #a56628;
+      --ok: #1c9d5c; --warn: #b08100; --err: #d43535; --fiction: #c22980;
+      --shadow-sm: 0 1px 2px rgba(20,16,8,.10);
+      --shadow-md: 0 6px 22px rgba(20,16,8,.12);
+      --shadow-lg: 0 14px 40px rgba(20,16,8,.18);
+      --ring: 0 0 0 3px rgba(181,113,47,.30);
+    }
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; min-height: 100vh; display: flex; flex-direction: column; }
-  header { display: flex; align-items: center; gap: 16px; padding: 14px 22px; border-bottom: 1px solid var(--border); background: var(--panel); }
+  header { display: flex; align-items: center; gap: 16px; padding: 14px 22px; border-bottom: 1px solid var(--border); background: var(--panel); box-shadow: var(--shadow-sm); }
   header h1 { font-size: 17px; font-weight: 600; letter-spacing: .3px; }
   .status-pill { font-size: 12px; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); white-space: nowrap; }
   .status-pill.ok { color: var(--ok); border-color: var(--ok); }
   .status-pill.err { color: var(--err); border-color: var(--err); }
   .status-pill.warn { color: var(--warn); border-color: var(--warn); }
   .status-pill.actionable { cursor: pointer; }
+  .status-pill.ok::before { content: '✓ '; }
+  .status-pill.err::before { content: '✗ '; }
+  .status-pill.warn::before { content: '⚠ '; }
   .pulse { animation: pulse 1.6s ease-in-out infinite; }
   @keyframes pulse { 50% { opacity: .45; } }
-  nav { display: flex; gap: 6px; padding: 10px 22px; border-bottom: 1px solid var(--border); background: var(--panel); }
-  nav button { background: transparent; border: 1px solid var(--border); color: var(--muted); padding: 8px 18px; border-radius: 8px; cursor: pointer; font-size: 13px; transition: .15s; }
+  nav { display: flex; gap: 6px; padding: 10px 22px; border-bottom: 1px solid var(--border); background: var(--panel); box-shadow: var(--shadow-sm); }
+  nav button { background: transparent; border: 1px solid var(--border); color: var(--muted); padding: 8px 16px; border-radius: 8px; cursor: pointer; font-size: 13px; transition: .15s; display: inline-flex; align-items: center; gap: 6px; }
   nav button:hover { color: var(--text); border-color: var(--accent); }
-  nav button.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+  nav button.active { background: var(--accent); color: #fff; border-color: var(--accent); box-shadow: var(--shadow-sm); }
   main { padding: 22px; max-width: 1100px; margin: 0 auto; flex: 1; min-height: 0; width: 100%; display: flex; flex-direction: column; }
   main:has(#tab-chat.active) { max-width: none; }
   .tab { display: none; }
   .tab.active { display: block; }
-  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 18px; margin-bottom: 18px; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 18px; margin-bottom: 18px; box-shadow: var(--shadow-sm); }
   .panel h3 { font-size: 14px; color: var(--muted); text-transform: uppercase; letter-spacing: .6px; margin-bottom: 14px; }
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 18px; }
   label { display: block; font-size: 12.5px; color: var(--muted); margin: 10px 0 4px; }
-  input[type=text], input[type=number], select {
+  input[type=text], input[type=number], input[type=password], select, textarea {
     width: 100%; background: var(--panel2); border: 1px solid var(--border); color: var(--text);
     padding: 9px 11px; border-radius: 8px; font-size: 13.5px; outline: none;
   }
-  input:focus, select:focus { border-color: var(--accent); }
-  .btn { background: var(--accent); border: none; color: #fff; padding: 10px 20px; border-radius: 8px; font-size: 13.5px; cursor: pointer; font-weight: 600; transition: .15s; }
+  input:focus, select:focus, textarea:focus { border-color: var(--accent); box-shadow: var(--ring); }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .btn { background: var(--accent); border: none; color: #fff; padding: 10px 20px; border-radius: 8px; font-size: 13.5px; cursor: pointer; font-weight: 600; transition: .15s; box-shadow: var(--shadow-sm); }
   .btn:hover { background: var(--accent-hover); filter: brightness(1.05); }
-  .btn.secondary { background: var(--panel2); border: 1px solid var(--border); color: var(--text); font-weight: 500; }
+  .btn.secondary { background: var(--panel2); border: 1px solid var(--border); color: var(--text); font-weight: 500; box-shadow: none; }
   .btn.danger { background: var(--err); }
-  .btn:disabled { opacity: .5; cursor: not-allowed; }
+  .btn:disabled { opacity: .5; cursor: not-allowed; box-shadow: none; }
   .btn-row { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
   .dir-row { display: flex; gap: 8px; }
   .dir-row input { flex: 1; }
   .stat-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 16px; }
-  .stat-card { background: var(--panel2); border: 1px solid var(--border); border-radius: 10px; padding: 14px; text-align: center; }
+  .stat-card { background: var(--panel2); border: 1px solid var(--border); border-radius: 10px; padding: 14px; text-align: center; box-shadow: var(--shadow-sm); }
   .stat-card .num { font-size: 26px; font-weight: 700; }
   .stat-card .lbl { font-size: 11.5px; color: var(--muted); margin-top: 4px; text-transform: uppercase; letter-spacing: .5px; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
@@ -69,7 +90,7 @@
   .log-box { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px; font-family: ui-monospace, monospace; font-size: 11.5px; max-height: 260px; overflow: auto; white-space: pre-wrap; color: var(--muted); }
   .chat-panel { display: flex; flex-direction: column; flex: 1; min-height: 0; }
   .chat-panel > h3, .chat-panel > .grid, #chatBlocked { flex-shrink: 0; }
-  .chat-toolbar { display: flex; align-items: center; justify-content: space-between; }
+  .chat-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
   .chat-toolbar .btn { padding: 5px 12px; font-size: 12px; font-weight: 500; background: var(--panel2); border: 1px solid var(--border); color: var(--muted); border-radius: 8px; }
   .chat-toolbar .btn:hover { color: var(--text); border-color: var(--accent); }
   #chatOut { flex: 1 1 auto; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 14px; margin-top: 12px; padding: 4px 2px 6px; }
@@ -80,8 +101,10 @@
   .chat-msg .who { display: flex; align-items: center; justify-content: space-between; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 6px; }
   .chat-msg .when { text-transform: none; letter-spacing: 0; font-size: 10.5px; }
   .chat-input-row { display: flex; gap: 10px; align-items: flex-end; margin-top: 12px; }
-  .chat-input-row .chat-msg.user { flex: 1; margin: 0; }
   #btnAsk { flex-shrink: 0; }
+  #chatInput { resize: none; max-height: 140px; line-height: 1.5; padding: 12px 14px; min-height: 46px; }
+  .chat-input-row #chatInput { flex: 1; width: auto; }
+  #chatInput::placeholder { color: var(--muted); opacity: .7; }
   .source { margin-top: 10px; padding: 10px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; font-size: 12.5px; }
   .source .title-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; cursor: pointer; user-select: none; }
   .source .caret { color: var(--muted); font-size: 10px; transition: transform .15s; }
@@ -97,7 +120,7 @@
   .chat-layout { display: flex; gap: 16px; align-items: stretch; flex: 1; min-height: 0; }
   .chat-sidebar { width: 250px; flex-shrink: 0; display: flex; flex-direction: column; gap: 8px; min-height: 0; }
   .chat-sidebar .btn { width: 100%; }
-  #convList { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; overflow-y: auto; flex: 1; }
+  #convList { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; overflow-y: auto; flex: 1; box-shadow: var(--shadow-sm); }
   .conv-item { display: flex; align-items: center; gap: 6px; padding: 9px 11px; cursor: pointer; border-bottom: 1px solid var(--border); font-size: 13px; color: var(--text); }
   .conv-item:hover { background: var(--panel2); }
   .conv-item.active { background: var(--panel2); box-shadow: inset 2px 0 0 var(--accent); }
@@ -113,7 +136,7 @@
 
   /* ── First-run wizard ── */
   .wizard-overlay { position: fixed; inset: 0; background: rgba(14,13,11,.75); display: flex; align-items: center; justify-content: center; z-index: 200; }
-  .wizard { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; width: min(680px, 94vw); max-height: 90vh; display: flex; flex-direction: column; overflow: hidden; }
+  .wizard { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; width: min(680px, 94vw); max-height: 90vh; display: flex; flex-direction: column; overflow: hidden; box-shadow: var(--shadow-lg); }
   .wizard-head { padding: 20px 22px; border-bottom: 1px solid var(--border); }
   .wizard-head h2 { font-size: 18px; margin-bottom: 4px; }
   .wizard-steps { display: flex; gap: 6px; padding: 12px 22px 0; }
@@ -129,7 +152,7 @@
 
   /* ── Folder picker dialog ── */
   .modal-overlay { position: fixed; inset: 0; background: rgba(14,13,11,.62); display: flex; align-items: center; justify-content: center; z-index: 100; }
-  .modal { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; width: min(640px, 94vw); max-height: 80vh; display: flex; flex-direction: column; overflow: hidden; }
+  .modal { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; width: min(640px, 94vw); max-height: 80vh; display: flex; flex-direction: column; overflow: hidden; box-shadow: var(--shadow-lg); }
   .modal h3 { padding: 14px 18px; border-bottom: 1px solid var(--border); font-size: 14px; }
   .modal-body { padding: 12px 18px; flex: 1; overflow: auto; }
   .modal-footer { padding: 12px 18px; border-top: 1px solid var(--border); display: flex; gap: 8px; justify-content: flex-end; align-items: center; }
@@ -146,6 +169,29 @@
   .fs-row.dim .ico { color: var(--muted); }
   .fs-row .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .fs-row .btn { padding: 4px 12px; font-size: 12px; font-weight: 500; }
+
+  /* ── Reusable confirm / prompt dialog ── */
+  #dlgOverlay { z-index: 300; }
+  .dlg { width: min(440px, 94vw); }
+  .dlg .modal-body { padding: 18px; }
+  .dlg .dlg-msg { font-size: 14px; line-height: 1.5; white-space: pre-wrap; }
+  .dlg .dlg-input { margin-top: 12px; }
+  .dlg .dlg-foot { display: flex; gap: 8px; justify-content: flex-end; align-items: center; }
+  .dlg .dlg-ico { font-size: 34px; text-align: center; margin-bottom: 6px; }
+
+  /* ── Nav icons ── */
+  .nav-ico { font-size: 14px; line-height: 1; }
+
+  /* ── Responsive chat ── */
+  @media (max-width: 820px) {
+    .chat-layout { flex-direction: column; }
+    .chat-sidebar { width: 100%; flex-direction: row; flex-wrap: wrap; align-items: center; }
+    .chat-sidebar .btn { width: auto; }
+    #convList { max-height: 200px; width: 100%; }
+    nav { flex-wrap: wrap; }
+    header { flex-wrap: wrap; }
+  }
+
 </style>
 </head>
 <body>
@@ -158,11 +204,11 @@
   <span class="small muted" id="curveInfo"></span>
 </header>
 <nav>
-  <button data-tab="tab-setup">Setup</button>
-  <button data-tab="tab-scan">Scan</button>
-  <button data-tab="tab-ocr">OCR</button>
-  <button data-tab="tab-ingest">Ingest</button>
-  <button class="active" data-tab="tab-chat">Chat</button>
+  <button data-tab="tab-setup"><span class="nav-ico">&#9881;</span> Setup</button>
+  <button data-tab="tab-scan"><span class="nav-ico">&#128269;</span> Scan</button>
+  <button data-tab="tab-ocr"><span class="nav-ico">&#128424;</span> OCR</button>
+  <button data-tab="tab-ingest"><span class="nav-ico">&#128228;</span> Ingest</button>
+  <button class="active" data-tab="tab-chat"><span class="nav-ico">&#128172;</span> Chat</button>
 </nav>
 <main>
 
@@ -467,13 +513,11 @@
         </div>
       </div>
       <div id="chatBlocked">&#9203; <b>Indexing is running</b> &mdash; chat is paused until it finishes (or is stopped). You can pause/stop it from the <b>Ingest</b> tab.</div>
-      <div id="chatOut">
+      <div id="chatOut" role="log" aria-live="polite" aria-label="Conversation messages">
         <div class="chat-empty">No messages yet. Ask a question about your documents.</div>
       </div>
       <div class="chat-input-row">
-        <div class="chat-msg user">
-          <div contenteditable="true" id="chatInput" style="outline:none; min-height:24px" data-placeholder="Ask a question about your documents&hellip;"></div>
-        </div>
+        <textarea id="chatInput" rows="1" placeholder="Ask a question about your documents&hellip;  (Enter to send, Shift+Enter for a new line)" aria-label="Your question"></textarea>
         <button class="btn" id="btnAsk">Ask</button>
       </div>
     </div>
@@ -588,6 +632,23 @@
   </div>
 </div>
 
+<!-- ── Reusable confirm / prompt dialog ── -->
+<div class="modal-overlay hidden" id="dlgOverlay">
+  <div class="modal dlg" role="dialog" aria-modal="true">
+    <div class="modal-body">
+      <div class="dlg-ico" id="dlgIco">&#10067;</div>
+      <div class="dlg-msg" id="dlgMsg"></div>
+      <input type="text" class="dlg-input hidden" id="dlgInput">
+    </div>
+    <div class="modal-footer dlg-foot">
+      <span class="small muted" id="dlgErr" style="color:var(--err)"></span>
+      <span style="flex:1"></span>
+      <button class="btn secondary" id="dlgCancel">Cancel</button>
+      <button class="btn" id="dlgOk">OK</button>
+    </div>
+  </div>
+</div>
+
 <div id="toast"></div>
 
 <script>
@@ -616,6 +677,56 @@ function fmtSize(mb) { return mb >= 1024 ? (mb/1024).toFixed(1) + ' GB' : Math.r
 function el(tag, cls, html) { const e = document.createElement(tag); if (cls) e.className = cls; if (html != null) e.innerHTML = html; return e; }
 function escapeHtml(s) {
   return (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// Disable a button while a promise runs (guards against double-clicks).
+async function runBusy(btn, fn) {
+  if (!btn) return fn();
+  const wasDisabled = btn.disabled;
+  const orig = btn.innerHTML;
+  btn.disabled = true;
+  btn.insertAdjacentHTML('afterbegin', '<span class="spinner"></span>');
+  try { return await fn(); }
+  finally {
+    btn.disabled = wasDisabled;
+    btn.innerHTML = orig;
+  }
+}
+
+// Reusable confirm / prompt dialog. Resolves with a string (input) or boolean
+// (confirm), or null when cancelled.
+function showDlg(opts) {
+  return new Promise(resolve => {
+    const overlay = $('#dlgOverlay');
+    const msg = $('#dlgMsg');
+    const input = $('#dlgInput');
+    const ico = $('#dlgIco');
+    const err = $('#dlgErr');
+    const ok = $('#dlgOk');
+    const cancel = $('#dlgCancel');
+    msg.textContent = opts.message || '';
+    ico.textContent = opts.icon || (opts.input ? '&#128221;' : (opts.danger ? '&#9888;' : '&#10067;'));
+    err.textContent = '';
+    const isInput = !!opts.input;
+    input.classList.toggle('hidden', !isInput);
+    if (isInput) { input.value = opts.value != null ? opts.value : ''; input.placeholder = opts.inputPlaceholder || ''; }
+    ok.textContent = opts.okText || (isInput ? 'OK' : 'Confirm');
+    ok.classList.toggle('danger', !!opts.danger);
+    cancel.classList.toggle('hidden', opts.hideCancel);
+    overlay.classList.remove('hidden');
+    const done = (val) => { overlay.classList.add('hidden'); ok.onclick = null; cancel.onclick = null; resolve(val); };
+    ok.onclick = () => {
+      if (isInput) {
+        const v = input.value.trim();
+        if (opts.required && !v) { err.textContent = opts.errText || 'This field is required.'; input.focus(); return; }
+        done(v);
+      } else done(true);
+    };
+    cancel.onclick = () => done(null);
+    overlay.onclick = (e) => { if (e.target === overlay && !opts.hideCancel) done(null); };
+    if (isInput) input.focus();
+    else ok.focus();
+  });
 }
 
 // ── Nav tabs ──
@@ -686,11 +797,11 @@ async function refreshIngest() {
   const blocked = $('#chatBlocked');
   if (running) {
     askBtn.disabled = true;
-    chatInput.setAttribute('contenteditable', 'false');
+    chatInput.disabled = true;
     blocked.classList.add('show');
   } else {
     askBtn.disabled = false;
-    chatInput.setAttribute('contenteditable', 'true');
+    chatInput.disabled = false;
     blocked.classList.remove('show');
   }
 
@@ -773,7 +884,7 @@ async function refreshOcr() {
 }
 setInterval(refreshOcr, 2500);
 
-$('#btnOcr').onclick = async () => {
+$('#btnOcr').onclick = () => runBusy($('#btnOcr'), async () => {
   const r = await api.post('/api/ocr', {
     target: $('#ocrTarget').value.trim(),
     mode: $('#ocrMode').value,
@@ -783,7 +894,7 @@ $('#btnOcr').onclick = async () => {
   });
   toast(r.ok ? r.message : (r.message || 'OCR start failed.'));
   if (r.ok) refreshOcr();
-};
+});
 $('#btnPauseOcr').onclick = async () => {
   const r = await api.post('/api/ocr/control', { action: $('#btnPauseOcr').textContent === 'Resume' ? 'resume' : 'pause' });
   toast(r.message || (r.ok ? 'OK' : 'Failed'));
@@ -866,7 +977,7 @@ async function loadConfig() {
 }
 loadConfig();
 
-$('#btnSaveConfig').onclick = async () => {
+$('#btnSaveConfig').onclick = () => runBusy($('#btnSaveConfig'), async () => {
   const splitList = s => s.split(',').map(x => x.trim()).filter(Boolean);
   const body = {
     embed_model: $('#cfgEmbedModel').value.trim(),
@@ -891,10 +1002,10 @@ $('#btnSaveConfig').onclick = async () => {
   const r = await api.post('/api/config', body);
   toast(r.ok ? 'Config saved.' : 'Save failed.');
   if (r.ok) loadConfig();
-};
+});
 
 $('#btnCheckLlm').onclick = () => { toast('Checking...', 400); setTimeout(refreshStatus, 1500); };
-$('#btnApplyLlm').onclick = async () => {
+$('#btnApplyLlm').onclick = () => runBusy($('#btnApplyLlm'), async () => {
   const r = await api.post('/api/llm/apply', {
     llm_base_url: $('#cfgLlmUrl').value.trim(),
     llm_model: $('#cfgLlmModel').value.trim(),
@@ -902,17 +1013,17 @@ $('#btnApplyLlm').onclick = async () => {
   });
   toast(r.ok ? 'LLM settings applied.' : 'Apply failed.');
   if (r.ok) refreshStatus();
-};
+});
 
 // ── Embedding model load / apply ──
-$('#btnEmbedLoad').onclick = async () => {
+$('#btnEmbedLoad').onclick = () => runBusy($('#btnEmbedLoad'), async () => {
   const model = $('#cfgEmbedModel').value.trim();
   if (!model) return toast('Enter a model name first.');
   const r = await api.post('/api/embed/load', { model, device: $('#cfgEmbedDevice').value });
   if (!r.ok) return toast(r.error || 'Load failed.');
   $('#embedLoadLive').classList.remove('hidden');
   pollEmbedLoad();
-};
+});
 let embedLoadPoll = null;
 async function pollEmbedLoad() {
   const s = await api.get('/api/embed/load/status');
@@ -941,7 +1052,7 @@ async function pollEmbedLoad() {
     $('#embedLoadInfo').textContent = s.real_mb ? `~${fmtSize(s.real_mb)} on disk` : '';
   }
 }
-$('#btnEmbedApply').onclick = async () => {
+$('#btnEmbedApply').onclick = () => runBusy($('#btnEmbedApply'), async () => {
   const model = $('#cfgEmbedModel').value.trim();
   if (!model) return toast('Enter a model name first.');
   const r = await api.post('/api/embed/apply', {
@@ -952,7 +1063,7 @@ $('#btnEmbedApply').onclick = async () => {
   toast('Embedding model applied. Re-index with Force re-embed (Ingest tab) to rebuild vectors.');
   $('#embedReindexHint').innerHTML = '&#9888; Changing the embedding model requires re-indexing: open the <b>Ingest</b> tab, tick <b>Force re-embed</b>, and run ingest again.';
   renderEmbedPicker(); updateEmbedMeta();
-};
+});
 
 // ── Self-hosted llama-server (dormant when binary absent) ──
 async function refreshSelfhost() {
@@ -1195,7 +1306,11 @@ $('#fsSelect').onclick = () => {
   closePicker();
 };
 $('#fsModal').addEventListener('click', e => { if (e.target === $('#fsModal')) closePicker(); });
-document.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('#fsModal').classList.contains('hidden')) closePicker(); });
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Escape') return;
+  if (!$('#fsModal').classList.contains('hidden')) closePicker();
+  else if (!$('#dlgOverlay').classList.contains('hidden')) $('#dlgCancel').click();
+});
 
 // ── Scan ──
 $('#btnScan').onclick = async () => {
@@ -1230,26 +1345,39 @@ function renderScan(r) {
     tb.appendChild(el('tr', '', `<td>${ext}</td><td>${s.count}</td><td>${s.ocr_needed||'-'}</td><td>${fmtSize((s.size||0)/1048576)}</td>`));
   });
   const ocrList = (r.files || []).filter(f => f.needs_ocr);
-  $('#sOcrList').innerHTML = ocrList.length ? ocrList.slice(0, 200).map(f=>`<div>${escapeHtml(f.path)}</div>`).join('')
-    : '<div>No files need OCR.</div>';
+  const box = $('#sOcrList');
+  box.innerHTML = '';
+  if (!ocrList.length) {
+    box.appendChild(el('div', '', 'No files need OCR.'));
+  } else {
+    const SHOW = 200;
+    ocrList.slice(0, SHOW).forEach(f => box.appendChild(el('div', '', escapeHtml(f.path))));
+    if (ocrList.length > SHOW) {
+      const more = el('button', 'btn secondary', `Show all ${ocrList.length} files`);
+      more.style.marginTop = '8px';
+      more.onclick = () => { box.innerHTML = ''; ocrList.forEach(f => box.appendChild(el('div', '', escapeHtml(f.path)))); };
+      box.appendChild(more);
+    }
+  }
 }
 
 // ── Ingest ──
-$('#btnIngest').onclick = async () => {
+$('#btnIngest').onclick = () => runBusy($('#btnIngest'), async () => {
   const target = $('#ingestTarget').value.trim();
   const set = $('#ingestSet').value.trim();
   if (!target) return toast('Enter a directory first.');
   const r = await api.post('/api/ingest', { target, set, force: $('#ingestForce').checked });
   toast(r.message);
   if (r.ok) refreshIngest();
-};
+});
 $('#btnPauseIngest').onclick = async () => {
   const r = await api.post('/api/ingest/control', { action: $('#btnPauseIngest').textContent === 'Resume' ? 'resume' : 'pause' });
   toast(r.message, 2500);
   refreshIngest();
 };
 $('#btnStopIngest').onclick = async () => {
-  if (!confirm('Stop the running index job? It will finish the current file, release the lock, and free chat.')) return;
+  const ok = await showDlg({ message: 'Stop the running index job? It will finish the current file, release the lock, and free chat.', danger: true, okText: 'Stop', icon: '&#9888;' });
+  if (!ok) return;
   const r = await api.post('/api/ingest/control', { action: 'stop' });
   toast(r.message, 3500);
   refreshIngest();
@@ -1290,10 +1418,11 @@ async function updateCollection(c) {
   if ($('#btnIngest').disabled) return toast('Ingest is already running.');
   let path = c.path;
   if (!path) {
-    path = prompt(`No directory is saved for collection "${c.name}". Enter the directory to index:`);
+    path = await showDlg({ message: `No directory is saved for collection "${c.name}". Enter the directory to index:`, input: true, okText: 'Index', required: true });
     if (!path) return;
-  } else if (!confirm(`Re-ingest "${c.name}" from:\n${path}\n\nNew/changed files will be added; missing ones stay (incremental).`)) {
-    return;
+  } else {
+    const ok = await showDlg({ message: `Re-ingest "${c.name}" from:\n${path}\n\nNew/changed files will be added; missing ones stay (incremental).`, okText: 'Re-ingest' });
+    if (!ok) return;
   }
   const r = await api.post('/api/sets', { name: c.name, path });
   if (!r.ok) return toast(r.message || 'Failed to save set.', 4000);
@@ -1303,7 +1432,7 @@ async function updateCollection(c) {
 }
 
 async function renameCollection(c) {
-  const to = prompt(`Rename collection "${c.name}" to:`, c.name);
+  const to = await showDlg({ message: `Rename collection "${c.name}" to:`, input: true, value: c.name, okText: 'Rename' });
   if (!to || to === c.name) return;
   const r = await api.post('/api/collections/rename', { from: c.name, to: to.trim() });
   toast(r.message, 3500);
@@ -1311,13 +1440,14 @@ async function renameCollection(c) {
 }
 
 async function deleteCollection(c) {
-  if (!confirm(`Delete collection "${c.name}" (${c.count} chunks)? This removes its index entries.`)) return;
+  const ok = await showDlg({ message: `Delete collection "${c.name}" (${c.count} chunks)? This removes its index entries.`, danger: true, okText: 'Delete', icon: '&#9888;' });
+  if (!ok) return;
   const r = await api.post('/api/collections/' + encodeURIComponent(c.name), {}, 'DELETE');
   toast(r.message, 3500);
   refreshCollections();
 }
 
-$('#btnImport').onclick = async () => {
+$('#btnImport').onclick = () => runBusy($('#btnImport'), async () => {
   const name = $('#impSet').value.trim();
   const path = $('#impTarget').value.trim();
   if (!name) return toast('Enter a collection name.');
@@ -1332,7 +1462,7 @@ $('#btnImport').onclick = async () => {
     $('#ingestLive').classList.remove('hidden');
     refreshIngest();
   }
-};
+});
 
 // ── Chat ──
 let currentConv = null;   // conversation id, or null for an unsaved new chat
@@ -1379,7 +1509,8 @@ function newChat() {
   renderConvs();
 }
 async function deleteConv(id) {
-  if (!confirm('Delete this chat permanently?')) return;
+  const ok = await showDlg({ message: 'Delete this chat permanently?', danger: true, okText: 'Delete', icon: '&#9888;' });
+  if (!ok) return;
   await api.post('/api/conversations/' + id, {}, 'DELETE');
   if (currentConv === id) newChat();
   loadConvs();
@@ -1452,66 +1583,158 @@ function makeSource(s) {
   if (hasSnippet) src.querySelector('.title-row').onclick = () => src.classList.toggle('open');
   return src;
 }
-function addThinking(turn) {
-  const t = el('div', 'chat-msg', `<div class="who">agent <span class="when">${chatTime()}</span></div><span class="spinner"></span>thinking&hellip;`);
-  turn.appendChild(t);
-  scrollChat();
-  return t;
-}
-function addAgentMsg(turn, html) {
-  const box = el('div', 'chat-msg');
-  box.appendChild(el('div', 'who', `agent <span class="when">${chatTime()}</span>`));
-  box.insertAdjacentHTML('beforeend', html);
-  turn.appendChild(box);
-  scrollChat();
-  return box;
-}
 $('#btnAsk').onclick = ask;
 $('#btnClearChat').onclick = async () => {
   if (!currentConv) { newChat(); toast('Conversation cleared.'); return; }
   const r = await api.post('/api/conversations/' + currentConv + '/clear');
   if (r && !r.error) { openConv(currentConv); toast('Conversation cleared.'); }
 };
-$('#chatInput').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); ask(); } });
+
+// ── Chat input (auto-grow textarea) ──
+function autoGrow(input) {
+  input.style.height = 'auto';
+  input.style.height = Math.min(input.scrollHeight, 140) + 'px';
+}
+$('#chatInput').addEventListener('input', () => autoGrow($('#chatInput')));
+$('#chatInput').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); ask(); }
+});
+// Focus the chat input with Ctrl/Cmd+K or "/" when not typing elsewhere.
+document.addEventListener('keydown', e => {
+  const t = e.target;
+  const typing = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable);
+  const modalOpen = !$('#dlgOverlay').classList.contains('hidden') || !$('#fsModal').classList.contains('hidden');
+  if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K')) {
+    e.preventDefault();
+    if (!$('#tab-chat').classList.contains('active')) goTab('tab-chat');
+    $('#chatInput').focus(); return;
+  }
+  if (e.key === '/' && !typing && !modalOpen) {
+    e.preventDefault();
+    if (!$('#tab-chat').classList.contains('active')) goTab('tab-chat');
+    $('#chatInput').focus();
+  }
+});
+
+// Read a POSTed SSE stream (/api/chat/stream). Events: delta | done | error.
+async function postSSE(url, body, handlers) {
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok || !resp.body) {
+    let msg = `Request failed (HTTP ${resp.status}).`;
+    try { const j = await resp.json(); if (j.error) msg = j.error; } catch (_) {}
+    throw new Error(msg);
+  }
+  const reader = resp.body.getReader();
+  const dec = new TextDecoder();
+  let buf = '';
+  let event = '';
+  const dispatch = (ev, dataStr) => {
+    let data;
+    try { data = JSON.parse(dataStr); } catch (_) { data = dataStr; }
+    if (ev === 'delta') handlers.onDelta && handlers.onDelta(data);
+    else if (ev === 'done') handlers.onDone && handlers.onDone(data);
+    else if (ev === 'error') handlers.onError && handlers.onError(data);
+  };
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let idx;
+    while ((idx = buf.indexOf('\n\n')) !== -1) {
+      const block = buf.slice(0, idx); buf = buf.slice(idx + 2);
+      for (const line of block.split('\n')) {
+        if (line.startsWith('event:')) event = line.slice(6).trim();
+        else if (line.startsWith('data:')) dispatch(event, line.slice(5).trim());
+      }
+      event = '';
+    }
+  }
+}
+
 async function ask() {
-  const q = $('#chatInput').textContent.trim();
+  const input = $('#chatInput');
+  const q = input.value.trim();
   const set = $('#chatSet').value;
   if (!q) return toast('Type a question.');
   if (!set) return toast('No collection yet — run Ingest first.');
   const askBtn = $('#btnAsk');
   if (askBtn.disabled) return;
-  askBtn.disabled = true;
 
-  let thinking = null;
+  let convId = currentConv;
   try {
-    if (!currentConv) {
+    if (!convId) {
       const created = await api.post('/api/conversations', { title: 'New chat', set });
       if (!created || !created.id) throw new Error(created?.error || 'Could not create a conversation.');
-      currentConv = created.id;
+      convId = currentConv = created.id;
     }
     const out = $('#chatOut');
     out.querySelector('.chat-empty')?.remove();
-
     const turn = el('div', 'chat-turn');
     turn.appendChild(el('div', 'chat-msg user', `<div class="who">you <span class="when">${chatTime()}</span></div>${escapeHtml(q)}`));
-    $('#chatInput').textContent = '';
     out.appendChild(turn);
     scrollChat();
 
-    thinking = addThinking(turn);
-    const r = await api.post('/api/chat', { query: q, set, filter_kind: $('#chatKind').value, conversation_id: currentConv });
-    thinking.remove(); thinking = null;
-    if (r.error) {
-      addAgentMsg(turn, `<span style="color:var(--err)">${escapeHtml(r.error)}</span>`);
-      return;
+    const thinking = el('div', 'chat-msg', `<div class="who">agent <span class="when">${chatTime()}</span></div><span class="spinner"></span>thinking&hellip;`);
+    turn.appendChild(thinking);
+    scrollChat();
+
+    input.value = ''; autoGrow(input);
+    askBtn.disabled = true;
+
+    let gotAny = false;
+    let errMsg = null;
+    const agentBox = el('div', 'chat-msg');
+    const who = el('div', 'who', `agent <span class="when">${chatTime()}</span>`);
+    const ansEl = el('div', 'answer');
+    agentBox.appendChild(who); agentBox.appendChild(ansEl);
+
+    await postSSE('/api/chat/stream', {
+      query: q, set, filter_kind: $('#chatKind').value, conversation_id: convId,
+    }, {
+      onDelta: (t) => {
+        gotAny = true;
+        if (typeof t === 'string') ansEl.insertAdjacentText('beforeend', t);
+        scrollChat();
+      },
+      onDone: (d) => {
+        gotAny = true;
+        thinking.remove();
+        const content = (d && d.answer) || ansEl.textContent;
+        ansEl.textContent = '';
+        ansEl.insertAdjacentHTML('beforeend', escapeHtml(content || '').replace(/\n/g, '<br>'));
+        const meta = d || {};
+        if (meta.fiction_only) agentBox.appendChild(el('div', 'fiction-banner', '&#9888; All retrieved sources are fictional works. The answer is drawn from fiction and must not be treated as fact.'));
+        if (meta.low_relevance) agentBox.appendChild(el('div', 'lowrel-banner', '&#9888; The library has no strong match for this question. ' + escapeHtml(meta.relevance_reason || 'Low relevance') + ' — the answer comes from the model\'s own knowledge. Propose related searches to surface nearby material.'));
+        const sources = meta.sources || [];
+        if (sources.length) {
+          agentBox.appendChild(el('div', '', `<div class="small muted" style="margin:12px 0 4px">Sources (${sources.length}):</div>`));
+          for (const s of sources) agentBox.appendChild(makeSource(s));
+        }
+      },
+      onError: (d) => { errMsg = (d && (d.error || d.message)) || 'Stream error.'; },
+    });
+
+    if (thinking.parentNode) thinking.remove();
+    if (errMsg || !gotAny) {
+      agentBox.remove();
+      const reason = errMsg || 'No response received.';
+      turn.appendChild(el('div', 'chat-msg', `<div class="who">agent <span class="when">${chatTime()}</span></div><span style="color:var(--err)">${escapeHtml(reason)}</span>`));
+      input.value = q; autoGrow(input);  // keep the question on failure
+    } else {
+      turn.appendChild(agentBox);
     }
-    if (currentConv) {
-      const conv = await api.get('/api/conversations/' + currentConv);
+    scrollChat();
+    input.focus();
+    if (convId) {
+      const conv = await api.get('/api/conversations/' + convId);
       if (conv && !conv.error) renderConvMessages(conv);
       loadConvs();
     }
   } catch (e) {
-    if (thinking) thinking.remove();
     toast(e.message || 'Chat request failed. Check the server and LLM status.');
     console.error('Chat request failed:', e);
   } finally {

@@ -1278,6 +1278,98 @@ def api_chat():
     return jsonify(result), code
 
 
+def _persist_chat(conv_id, query, result):
+    """Persist a user/assistant turn to the conversation store on success."""
+    if not conv_id or "error" in result:
+        return
+    chat_store.add_message(conv_id, "user", query)
+    chat_store.add_message(conv_id, "assistant", result.get("answer", ""),
+                           {"sources": result.get("sources", []),
+                            "fiction_only": result.get("fiction_only", False),
+                            "low_relevance": result.get("low_relevance", False),
+                            "relevance_reason": result.get("relevance_reason", "")})
+
+
+@app.route("/api/chat/stream", methods=["POST"])
+def api_chat_stream():
+    """Streaming RAG chat for the web UI. Single-shot (no agentic loop).
+
+    SSE events: ``delta`` (raw text), ``done`` (final JSON incl. sources/meta),
+    ``error`` (JSON with an ``error`` string). Aborting mid-stream skips
+    persistence.
+    """
+    data = request.get_json(force=True) or {}
+    set_name = data.get("set", "library")
+    query = data.get("query", "").strip()
+    if not query:
+        return jsonify({"error": "No question"}), 400
+    top_k = int(data.get("top_k", load_cfg().get("retrieval_top_k", 10)))
+    filter_kind = data.get("filter_kind")
+    conv_id = data.get("conversation_id")
+    history = _conversation_history(conv_id)
+    return Response(
+        _stream_sse(set_name, query, top_k, filter_kind, history, conv_id),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache",
+                 "X-Accel-Buffering": "no"},
+    )
+
+
+def _stream_sse(set_name, query, top_k, filter_kind, history, conv_id):
+    import json as _json
+    cfg = load_cfg()
+    payload = _prepare_rag(set_name, query, top_k, filter_kind, history)
+    if "error" in payload:
+        yield "event: error\ndata: " + _json.dumps({"error": payload["error"]}) + "\n\n"
+        return
+    if "answer" in payload and "messages" not in payload:
+        text = payload["answer"]
+        yield "event: delta\ndata: " + _json.dumps(text) + "\n\n"
+        done = {"answer": text, "sources": payload.get("sources", []),
+                "fiction_only": payload.get("fiction_only", False),
+                "low_relevance": payload.get("low_relevance", False),
+                "relevance_reason": payload.get("relevance_reason", "")}
+        yield "event: done\ndata: " + _json.dumps(done) + "\n\n"
+        _persist_chat(conv_id, query, done)
+        return
+
+    client = get_chat_client()
+    full = []
+    try:
+        stream = client.chat.completions.create(
+            model=cfg.get("llm_model", "default"),
+            messages=payload["messages"],
+            temperature=cfg.get("llm_temperature", 0.3),
+            max_tokens=cfg.get("llm_max_tokens", 2048),
+            stream=True,
+        )
+        for chunk in stream:
+            delta = chunk.choices[0].delta if chunk.choices else None
+            text = None
+            if delta is not None:
+                text = getattr(delta, "content", None)
+                if not text:
+                    text = getattr(delta, "reasoning_content", None)
+            if text:
+                full.append(text)
+                yield "event: delta\ndata: " + _json.dumps(text) + "\n\n"
+    except Exception as e:
+        yield "event: error\ndata: " + _json.dumps({"error": str(e)}) + "\n\n"
+        return
+
+    answer = "".join(full).strip()
+    if not answer:
+        yield "event: error\ndata: " + _json.dumps(
+            {"error": "LLM returned no usable answer. Is the LLM API running?"}) + "\n\n"
+        return
+    done = {"answer": answer, "sources": payload.get("sources", []),
+            "fiction_only": payload.get("fiction_only", False),
+            "low_relevance": payload.get("low_relevance", False),
+            "relevance_reason": payload.get("relevance_reason", "")}
+    yield "event: done\ndata: " + _json.dumps(done) + "\n\n"
+    _persist_chat(conv_id, query, done)
+
+
 # ── OpenAI-compatible endpoints (for external AI chat clients) ───────────────
 
 @app.route("/v1/models")

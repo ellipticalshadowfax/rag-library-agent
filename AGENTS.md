@@ -14,6 +14,8 @@ repo. Do not introduce them back in.
 
 ## Layout
 - `scripts/server.py` — Flask backend (web server + all `/api/*` endpoints).
+  The web UI's chat streams tokens from `POST /api/chat/stream` (fetch-based
+  SSE: `delta`/`done`/`error` events, single-shot, persists via `_persist_chat`).
 - `scripts/agent.py` — chat helpers: retrieval, context building, the `SYSTEM_PROMPT`.
 - `scripts/agent_loop.py` — bounded agentic tool-calling loop for `/api/chat`:
   lets the LLM call `search_library`, `get_section`, or `summarize_work` tools
