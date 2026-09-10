@@ -23,7 +23,9 @@ os.environ["CUDA_VISIBLE_DEVICES"] = ""  # Force CPU for embeddings
 from flask import Flask, jsonify, request, send_from_directory, Response
 from flask_cors import CORS
 
-RAG_ROOT = Path(__file__).resolve().parent.parent
+from _paths import rag_root
+
+RAG_ROOT = rag_root()
 SCRIPTS_DIR = RAG_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 

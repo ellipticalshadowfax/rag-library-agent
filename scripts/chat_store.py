@@ -12,7 +12,9 @@ import time
 import uuid
 from pathlib import Path
 
-CONV_DIR = Path(__file__).resolve().parent.parent / "conversations"
+from _paths import rag_root
+
+CONV_DIR = rag_root() / "conversations"
 
 
 def _path(cid: str) -> Path:

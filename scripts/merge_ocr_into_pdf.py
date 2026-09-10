@@ -12,7 +12,9 @@ from pathlib import Path
 
 import fitz  # PyMuPDF
 
-RAG_ROOT = Path(__file__).resolve().parent.parent
+from _paths import rag_root
+
+RAG_ROOT = rag_root()
 OCR_CACHE = RAG_ROOT / "ocr"
 
 

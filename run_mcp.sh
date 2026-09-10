@@ -12,7 +12,11 @@
 # scripts/ingest.py first.
 
 set -euo pipefail
-cd "$(dirname "$0")"
+HERE="$(cd "$(dirname "$0")" && pwd)"
+cd "$HERE"
+
+# Data root override (see run.sh) so a symlinked deployment finds its data.
+export RAG_ROOT="$HERE"
 
 if [ ! -x .venv/bin/python ]; then
     echo "No .venv found. Run ./run.sh first (or create the venv manually)." >&2

@@ -24,7 +24,9 @@ from pathlib import Path
 
 import agent
 
-RAG_ROOT = Path(__file__).resolve().parent.parent
+from _paths import rag_root
+
+RAG_ROOT = rag_root()
 EVALS_DIR = RAG_ROOT / "evals"
 GOLDEN_PATH = EVALS_DIR / "golden.jsonl"
 RESULTS_PATH = EVALS_DIR / "results.json"

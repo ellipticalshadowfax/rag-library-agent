@@ -35,7 +35,9 @@ except ImportError:
 
 console = Console()
 
-RAG_ROOT = Path(__file__).resolve().parent.parent
+from _paths import rag_root
+
+RAG_ROOT = rag_root()
 SAMPLE_ROOT = Path(os.environ.get("OCR_SAMPLE_DIR", "/tmp/opencode/ocr_samples"))
 OCR_CACHE = RAG_ROOT / "ocr"
 REPORT_PATH = RAG_ROOT / "ocr_compare_report.json"

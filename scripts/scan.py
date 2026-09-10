@@ -12,6 +12,8 @@ from pathlib import Path
 import fitz  # PyMuPDF
 from rich.console import Console
 from rich.table import Table
+
+from _paths import rag_root
 from rich import box
 
 console = Console()
@@ -21,7 +23,7 @@ OCR_BACKEND = "pdftotext"
 
 
 def load_config():
-    cfg_path = Path(__file__).resolve().parent.parent / "config.json"
+    cfg_path = rag_root() / "config.json"
     with open(cfg_path) as f:
         return json.load(f)
 
@@ -292,7 +294,7 @@ def scan_directory(target: str, cfg: dict, return_results: bool = False):
     build_results(target_path, all_files, cal_tags, ocr_files,
                   fiction_count, nonfiction_count, untagged_count, stats)
     console.print(f"\n[dim]Full results written to "
-                  f"{Path(__file__).resolve().parent.parent / 'scan_results.json'}[/dim]")
+                  f"{rag_root() / 'scan_results.json'}[/dim]")
 
 
 def build_results(target_path, all_files, cal_tags, ocr_files,
@@ -311,7 +313,7 @@ def build_results(target_path, all_files, cal_tags, ocr_files,
         },
         "files": all_files,
     }
-    out_path = Path(__file__).resolve().parent.parent / "scan_results.json"
+    out_path = rag_root() / "scan_results.json"
     with open(out_path, "w") as fp:
         json.dump(result, fp, indent=2, default=str)
     return result

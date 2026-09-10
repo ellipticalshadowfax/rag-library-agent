@@ -8,7 +8,9 @@ import chromadb
 from pathlib import Path
 from sentence_transformers import SentenceTransformer
 
-c = chromadb.PersistentClient(path=str(Path(__file__).resolve().parent.parent / "index"))
+from _paths import rag_root
+
+c = chromadb.PersistentClient(path=str(rag_root() / "index"))
 col = c.get_collection("library")
 real = col.get(limit=50, include=["documents"])
 docs = [d[:1200] for d in real["documents"]]

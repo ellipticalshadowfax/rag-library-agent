@@ -10,6 +10,11 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$HERE"
 
+# Data root: default to this directory. A symlinked deployment (code lives in
+# the canonical repo, data lives in its own dir, e.g. /path/to/Data/RAG) sets
+# this to the deployment dir so config.json/index/.venv are found there.
+export RAG_ROOT="$HERE"
+
 PORT="${RAG_PORT:-5000}"
 HOST="${RAG_HOST:-127.0.0.1}"
 PY=python3

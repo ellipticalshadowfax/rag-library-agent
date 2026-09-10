@@ -18,6 +18,8 @@ from rich.panel import Panel
 from rich.table import Table
 from rich import box
 
+from _paths import rag_root
+
 console = Console()
 
 SYSTEM_PROMPT = """You are a research assistant with access to a large personal library index. Retrieved document excerpts are your PRIMARY evidence, but you are EXPECTED to also draw on your own knowledge to fill gaps, make inferences, and connect related ideas.
@@ -35,7 +37,7 @@ RULES:
 
 
 def load_config():
-    cfg_path = Path(__file__).resolve().parent.parent / "config.json"
+    cfg_path = rag_root() / "config.json"
     with open(cfg_path) as f:
         return json.load(f)
 
@@ -51,8 +53,7 @@ def setup_client(cfg: dict) -> OpenAI:
 
 
 def setup_chroma(set_name: str):
-    rag_root = Path(__file__).resolve().parent.parent
-    client = chromadb.PersistentClient(path=str(rag_root / "index"))
+    client = chromadb.PersistentClient(path=str(rag_root() / "index"))
     try:
         return client.get_collection(set_name)
     except Exception:
@@ -216,7 +217,7 @@ def _match_titles(query: str, set_name: str, limit: int = 4) -> list[str]:
     Returns matched titles, best first.
     """
     import sqlite3
-    db = Path(__file__).resolve().parent.parent / "manifest.db"
+    db = rag_root() / "manifest.db"
     if not db.exists():
         return []
     try:

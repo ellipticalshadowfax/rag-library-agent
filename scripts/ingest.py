@@ -25,9 +25,11 @@ console = Console()
 
 from agent import tokenize
 
+from _paths import rag_root
+
 EXTENSIONS_TEXT = {".pdf", ".epub", ".mobi", ".djvu", ".txt", ".html", ".htm"}
 
-INGEST_LOCK = Path(__file__).resolve().parent.parent / ".ingest.lock"
+INGEST_LOCK = rag_root() / ".ingest.lock"
 
 # Chroma upserts have a hard batch limit (~5461 embeddings per call). Instead of
 # failing the whole embed pass, we always upsert in batches of INGEST_BATCH_SIZE.
@@ -86,7 +88,7 @@ def release_ingest_lock():
 # ─── Config ──────────────────────────────────────────────────────────────────
 
 def load_config():
-    cfg_path = Path(__file__).resolve().parent.parent / "config.json"
+    cfg_path = rag_root() / "config.json"
     with open(cfg_path) as f:
         return json.load(f)
 
@@ -877,10 +879,10 @@ def ingest(target: str, set_name: str, cfg: dict, force: bool = False, only_path
         console.print(f"[red]Error: {target} is not a directory[/red]")
         sys.exit(1)
 
-    rag_root = Path(__file__).resolve().parent.parent
-    ocr_cache = rag_root / "ocr"
-    cache_dir = rag_root / "cache"
-    index_dir = rag_root / "index"
+    rag_root_ = rag_root()
+    ocr_cache = rag_root_ / "ocr"
+    cache_dir = rag_root_ / "cache"
+    index_dir = rag_root_ / "index"
 
     ocr_cache.mkdir(exist_ok=True)
     cache_dir.mkdir(exist_ok=True)
@@ -917,7 +919,7 @@ def ingest(target: str, set_name: str, cfg: dict, force: bool = False, only_path
         cal_tags = load_calibre_tags(cal_db)
 
     # Load manifest
-    manifest = Manifest(rag_root / "manifest.db")
+    manifest = Manifest(rag_root_ / "manifest.db")
 
     # Load ChromaDB
     client = chromadb.PersistentClient(path=str(index_dir))

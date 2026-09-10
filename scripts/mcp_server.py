@@ -36,7 +36,9 @@ os.environ["CUDA_VISIBLE_DEVICES"] = ""  # Force CPU for embeddings
 
 from mcp.server.fastmcp import FastMCP
 
-RAG_ROOT = Path(__file__).resolve().parent.parent
+from _paths import rag_root
+
+RAG_ROOT = rag_root()
 DEFAULT_SET = "library"
 _QUERY_STOP = {
     "the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "with",

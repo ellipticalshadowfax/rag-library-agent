@@ -20,7 +20,9 @@ os.environ["CUDA_VISIBLE_DEVICES"] = ""  # Force CPU
 
 import ingest as ING  # needs_ocr, ocr_pdf_rapidocr, merge_text_into_pdf
 
-RAG_ROOT = Path(__file__).resolve().parent.parent
+from _paths import rag_root
+
+RAG_ROOT = rag_root()
 OCR_CACHE = RAG_ROOT / "ocr"
 OCR_LOCK = RAG_ROOT / ".ocr.lock"
 
