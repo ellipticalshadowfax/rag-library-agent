@@ -23,6 +23,8 @@ from rich.console import Console
 
 console = Console()
 
+from agent import tokenize
+
 EXTENSIONS_TEXT = {".pdf", ".epub", ".mobi", ".djvu", ".txt", ".html", ".htm"}
 
 INGEST_LOCK = Path(__file__).resolve().parent.parent / ".ingest.lock"
@@ -112,6 +114,32 @@ class Manifest:
                 indexed_at REAL
             );
             CREATE INDEX IF NOT EXISTS idx_files_path ON files(rel_path);
+
+            CREATE TABLE IF NOT EXISTS bm25_tokens (
+                doc_id TEXT NOT NULL,
+                token TEXT NOT NULL,
+                tf INTEGER NOT NULL,
+                set_name TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (doc_id, token, set_name)
+            );
+
+            CREATE TABLE IF NOT EXISTS bm25_df (
+                token TEXT NOT NULL,
+                set_name TEXT NOT NULL DEFAULT '',
+                doc_freq INTEGER NOT NULL,
+                PRIMARY KEY (token, set_name)
+            );
+
+            CREATE TABLE IF NOT EXISTS parents (
+                parent_id TEXT PRIMARY KEY,
+                set_name TEXT NOT NULL DEFAULT '',
+                source TEXT NOT NULL DEFAULT '',
+                title TEXT NOT NULL DEFAULT '',
+                section_title TEXT NOT NULL DEFAULT '',
+                section_ordinal INTEGER NOT NULL DEFAULT 0,
+                text TEXT NOT NULL DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS idx_parents_source ON parents(source);
         """)
         self.conn.commit()
 
@@ -147,6 +175,69 @@ class Manifest:
     def get_indexed_paths(self) -> set[str]:
         rows = self.conn.execute("SELECT rel_path FROM files").fetchall()
         return {r["rel_path"] for r in rows}
+
+    def remove_bm25_tokens(self, doc_id: str, set_name: str = ""):
+        self.conn.execute(
+            "DELETE FROM bm25_tokens WHERE doc_id = ? AND set_name = ?",
+            (doc_id, set_name),
+        )
+
+    def write_bm25_tokens(self, doc_id: str, tokens: list[str],
+                          set_name: str = ""):
+        """Write token term-frequencies for a single document and update bm25_df."""
+        from collections import Counter
+        counts = Counter(tokens)
+        rows = [(doc_id, tok, tf, set_name) for tok, tf in counts.items()]
+        self.conn.executemany(
+            "INSERT OR REPLACE INTO bm25_tokens (doc_id, token, tf, set_name) "
+            "VALUES (?, ?, ?, ?)",
+            rows,
+        )
+        # Rebuild df for affected tokens
+        affected = list(counts.keys())
+        if affected:
+            placeholders = ",".join("?" * len(affected))
+            rows_df = self.conn.execute(
+                f"SELECT token, COUNT(DISTINCT doc_id) AS df "
+                f"FROM bm25_tokens WHERE token IN ({placeholders}) AND set_name = ?",
+                affected + [set_name],
+            ).fetchall()
+            for tok, df in rows_df:
+                self.conn.execute(
+                    "INSERT OR REPLACE INTO bm25_df (token, set_name, doc_freq) "
+                    "VALUES (?, ?, ?)",
+                    (tok, set_name, df),
+                )
+
+    def rebuild_bm25_df(self, set_name: str = ""):
+        """Full rebuild of the document-frequency table for a set."""
+        self.conn.execute(
+            "DELETE FROM bm25_df WHERE set_name = ?", (set_name,)
+        )
+        self.conn.execute(
+            "INSERT INTO bm25_df (token, set_name, doc_freq) "
+            "SELECT token, set_name, COUNT(DISTINCT doc_id) "
+            "FROM bm25_tokens WHERE set_name = ? GROUP BY token, set_name",
+            (set_name,),
+        )
+
+    def remove_parents(self, rel_path: str, set_name: str = ""):
+        self.conn.execute(
+            "DELETE FROM parents WHERE source = ? AND set_name = ?",
+            (rel_path, set_name),
+        )
+
+    def write_parents(self, rows: list):
+        """Persist parent (section-level) chunks. ``rows`` items need:
+        parent_id, set_name, source, title, section_title, section_ordinal, text."""
+        self.conn.executemany(
+            "INSERT OR REPLACE INTO parents (parent_id, set_name, source, title, "
+            "section_title, section_ordinal, text) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [(r["parent_id"], r["set_name"], r["source"], r["title"],
+              r["section_title"], int(r["section_ordinal"]), r["text"])
+             for r in rows],
+        )
+        self.conn.commit()
 
     def close(self):
         self.conn.close()
@@ -365,11 +456,141 @@ def merge_text_into_pdf(pdf_path: str, text_path: str) -> bool:
         console.print(f"[red]merge_text_into_pdf failed for {pdf_path}: {e}[/red]")
         return False
 
-# ─── Text Extraction ─────────────────────────────────────────────────────────
+# ─── Structure Detection (section maps for boundary-aware chunking) ──────────
+#
+# extract_text returns meta["sections"]: a list of
+#   {title, ordinal, start_char, end_char}
+# covering the whole extracted text. Empty/absent means "no structure found";
+# the recursive chunker then treats the whole document as one section.
+
+# Block-level HTML tags: emitted as paragraph breaks by the EPUB extractor so
+# the recursive chunker sees real paragraph boundaries.
+_BLOCK_TAGS = {"p", "div", "br", "h1", "h2", "h3", "h4", "h5", "h6",
+               "li", "tr", "section", "article", "blockquote"}
+
+_HEADING_PATTERNS = [
+    # "Chapter 3", "Chapter 3: Techniques", "Appendix B", "Part II"
+    re.compile(r"^(?:chapter|chap\.?|part|section|appendix)\s+[\dIVXLCivxlc]+\b"
+               r"[.:—–-]?\s*.{0,90}$", re.IGNORECASE),
+    # "3.2 Word Vectors" / "1. Introduction" (numbered headings, keep short)
+    re.compile(r"^\d{1,2}(?:\.\d{1,2}){0,3}[.:)]?\s+\S.{0,90}$"),
+    # Markdown-style "# Heading"
+    re.compile(r"^#{1,6}\s+\S.{0,90}$"),
+]
+
+
+def _is_heading_line(line: str) -> bool:
+    s = line.strip()
+    if not s or len(s) > 100:
+        return False
+    if any(p.match(s) for p in _HEADING_PATTERNS):
+        return True
+    # Short ALL-CAPS line ("INTRODUCTION", "THE GRAMMAR OF GRAPHICS")
+    letters = [c for c in s if c.isalpha()]
+    if (len(s) >= 8 and letters
+            and sum(1 for c in letters if c.isupper()) / len(letters) >= 0.9):
+        return True
+    return False
+
+
+def _sections_from_marks(marks: list, total: int, min_sections: int = 3) -> list:
+    """Turn (char_offset, title) marks into a section map covering the text."""
+    if total <= 0 or len(marks) < min_sections:
+        return []
+    sections = []
+    last = -1
+    for start, title in sorted(marks, key=lambda m: m[0]):
+        if start <= last:
+            continue
+        sections.append({"title": title, "ordinal": len(sections),
+                         "start_char": start, "end_char": total})
+        last = start
+    for i, sec in enumerate(sections):
+        sec["end_char"] = (sections[i + 1]["start_char"]
+                           if i + 1 < len(sections) else total)
+    return sections
+
+
+def _sections_from_flat(text: str, html: bool = False) -> list:
+    """Heading-pattern scan for .txt/.html (and PDF fallback).
+
+    A title repeated >= 4 times is treated as a running header/footer and
+    dropped, so repeated page headers don't shred the map into page sections.
+    """
+    total = len(text)
+    marks = []
+    if html:
+        for m in re.finditer(r"<h[1-6][^>]*>(.*?)</h[1-6]>", text,
+                             re.IGNORECASE | re.DOTALL):
+            t = " ".join(re.sub(r"<[^>]+>", " ", m.group(1)).split())[:120]
+            if t:
+                marks.append((m.start(), t))
+    pos = 0
+    for line in text.split("\n"):
+        if _is_heading_line(line):
+            marks.append((pos, line.strip()[:120]))
+        pos += len(line) + 1
+    from collections import Counter
+    counts = Counter(t for _, t in marks)
+    marks = [(p, t) for p, t in marks if counts[t] < 4]
+    return _sections_from_marks(marks, total, min_sections=(2 if html else 3))
+
+
+def _sections_from_pdf(text: str, page_texts: list, toc: list) -> list:
+    """Section map from PDF bookmarks (doc.get_toc), page-ranges mapped to
+    character offsets in the '\\n\\n'.joined page text."""
+    total = len(text)
+    if total <= 0 or not toc:
+        return []
+    offsets = []
+    pos = 0
+    for i, pt in enumerate(page_texts):
+        offsets.append(pos)
+        pos += len(pt) + (2 if i < len(page_texts) - 1 else 0)
+    marks = []
+    for level, title, page in toc:
+        try:
+            p = int(page) - 1
+        except (TypeError, ValueError):
+            continue
+        if not (0 <= p < len(offsets)):
+            continue
+        t = " ".join(str(title or "").split())[:120]
+        if t:
+            marks.append((offsets[p], t))
+    # Bookmarks are structural ground truth; only 2 needed to trust them.
+    return _sections_from_marks(marks, total, min_sections=2)
+
+
+def _epub_item_title(html: str, item_name: str, ordinal: int) -> str:
+    m = re.search(r"<h[1-6][^>]*>(.*?)</h[1-6]>", html, re.IGNORECASE | re.DOTALL)
+    if m:
+        t = " ".join(re.sub(r"<[^>]+>", " ", m.group(1)).split())
+        if t:
+            return t[:120]
+    m = re.search(r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
+    if m:
+        t = " ".join(m.group(1).split())
+        if t:
+            return t[:120]
+    return Path(item_name).stem or f"Chapter {ordinal + 1}"
+
+
+def _sections_from_parts(parts: list, total: int) -> list:
+    """One section per extracted EPUB spine item (chapter boundary)."""
+    marks = []
+    pos = 0
+    for i, (t, title) in enumerate(parts):
+        if t.strip():
+            marks.append((pos, title))
+        pos += len(t) + 2
+    # Item boundaries are structural; a single-chapter EPUB is still valid.
+    return _sections_from_marks(marks, total, min_sections=1)
+
 
 def extract_text(fpath: Path, ext: str, ocr_cache: Path) -> tuple[str, dict]:
-    """Extract text from a file. Returns (text, {page_texts})."""
-    meta = {"pages": []}
+    """Extract text from a file. Returns (text, {pages, sections})."""
+    meta = {"pages": [], "sections": []}
 
     if ext == ".pdf":
         # Check for OCR cache first
@@ -383,16 +604,22 @@ def extract_text(fpath: Path, ext: str, ocr_cache: Path) -> tuple[str, dict]:
             texts = []
             for page in doc:
                 texts.append(page.get_text())
+            try:
+                toc = doc.get_toc()
+            except Exception:
+                toc = []
             doc.close()
             text = "\n\n".join(texts)
             if len(text.strip()) > 50:
+                meta["sections"] = (_sections_from_pdf(text, texts, toc)
+                                    or _sections_from_flat(text))
                 return text, meta
         except Exception:
             pass
 
     elif ext == ".epub":
         try:
-            import ebooklib
+            import ebooklib  # noqa: F401
             from ebooklib import epub
             from html.parser import HTMLParser
 
@@ -404,28 +631,36 @@ def extract_text(fpath: Path, ext: str, ocr_cache: Path) -> tuple[str, dict]:
                 def handle_starttag(self, tag, attrs):
                     if tag in ("style", "script"):
                         self._skip += 1
+                    elif tag in _BLOCK_TAGS:
+                        self.result.append("\n\n")
                 def handle_endtag(self, tag):
                     if tag in ("style", "script"):
                         self._skip = max(0, self._skip - 1)
+                    elif tag in _BLOCK_TAGS:
+                        self.result.append("\n\n")
                 def handle_data(self, data):
                     if self._skip == 0:
                         self.result.append(data)
                 def get_text(self):
-                    return " ".join(self.result)
+                    raw = "".join(self.result)
+                    paras = [" ".join(p.split()) for p in re.split(r"\n\s*\n", raw)]
+                    return "\n\n".join(p for p in paras if p)
 
             book = epub.read_epub(str(fpath))
-            texts = []
             # Some EPUBs tag their content as ITEM_UNKNOWN instead of ITEM_DOCUMENT,
             # so match on filename rather than the (unreliable) type label.
             docs = [i for i in book.get_items()
                     if i.get_name().lower().endswith((".html", ".xhtml", ".htm"))]
+            parts = []  # (text, section_title) per spine item
             for item in docs:
+                html = item.get_content().decode("utf-8", errors="replace")
                 ext_parser = TextExtractor()
-                ext_parser.feed(item.get_content().decode("utf-8", errors="replace"))
+                ext_parser.feed(html)
                 t = ext_parser.get_text().strip()
                 if t:
-                    texts.append(t)
-            text = "\n\n".join(texts)
+                    parts.append((t, _epub_item_title(html, item.get_name(), len(parts))))
+            text = "\n\n".join(p[0] for p in parts)
+            meta["sections"] = _sections_from_parts(parts, len(text))
             return text, meta
         except Exception as e:
             console.print(f"[yellow]EPUB extraction failed for {fpath}: {e}[/yellow]")
@@ -433,6 +668,7 @@ def extract_text(fpath: Path, ext: str, ocr_cache: Path) -> tuple[str, dict]:
     elif ext == ".txt" or ext == ".html" or ext == ".htm":
         try:
             text = fpath.read_text(encoding="utf-8", errors="replace")
+            meta["sections"] = _sections_from_flat(text, html=(ext != ".txt"))
             return text, meta
         except Exception:
             pass
@@ -487,6 +723,152 @@ def chunk_text(text: str, chunk_tokens: int = 500, overlap: int = 100) -> list[s
             break
     return chunks
 
+
+# ─── Boundary-aware recursive chunking (chunking_strategy: parent_child) ─────
+
+_SENT_SPLIT_RE = re.compile(r"(?<=[.!?])\s+(?=[\"'‘“A-Z0-9])")
+
+
+def _split_sentences(paragraph: str) -> list[str]:
+    parts = _SENT_SPLIT_RE.split(paragraph.strip())
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _pack_pieces(pieces: list[str], chunk_tokens: int, overlap: int,
+                  big_piece_splitter=None) -> list[str]:
+    """Greedily pack pre-split text pieces (paragraphs / sentences) into chunks.
+
+    The token budget applies to NEW content only: the overlap prefix carried
+    from the previous chunk's tail does not count against it, so a chunk may
+    reach chunk_tokens + overlap words total. This keeps boundary-aware packing
+    at least as dense as the flat splitter (which also re-reads `overlap` words
+    per step). Oversized pieces are delegated to big_piece_splitter (or the
+    flat word-count splitter as last resort), so a piece is only ever cut
+    mid-piece when it alone exceeds the target.
+    """
+    chunks = []
+    carry = []            # words prefixed to the next chunk (from prev tail)
+    cur, cur_len = [], 0  # new-content pieces of the current chunk
+
+    def emit():
+        nonlocal cur, cur_len, carry
+        if not cur:
+            return
+        body = " ".join(cur)
+        chunks.append(" ".join(carry) + " " + body if carry else body)
+        words = body.split()
+        if overlap <= 0:
+            carry = []
+        else:
+            carry = list(words[-overlap:]) if len(words) > overlap else words
+        cur, cur_len = [], 0
+
+    for piece in pieces:
+        plen = len(piece.split())
+        if plen > chunk_tokens:
+            emit()
+            if big_piece_splitter is not None:
+                chunks.extend(big_piece_splitter(piece))
+            else:
+                chunks.extend(chunk_text(piece, chunk_tokens,
+                                         max(0, min(overlap, chunk_tokens - 1))))
+            carry = []
+            continue
+        if cur and cur_len + plen > chunk_tokens:
+            emit()
+        cur.append(piece)
+        cur_len += plen
+    emit()
+    return chunks
+
+
+def _normalize_sections(sections, total: int) -> list[dict]:
+    """Sort/clamp a section map, fill gaps, drop overlaps, renumber ordinals.
+    Guarantees every character of the text is covered by exactly one section."""
+    secs = []
+    for s in sections or []:
+        try:
+            start = max(0, min(int(s.get("start_char", 0)), total))
+            end = max(start, min(int(s.get("end_char", total)), total))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        title = str(s.get("title") or "").strip()
+        if end > start:
+            secs.append([start, end, title])
+    if not secs:
+        return ([{"title": "", "ordinal": 0, "start_char": 0, "end_char": total}]
+                if total > 0 else [])
+    secs.sort(key=lambda x: x[0])
+    norm = []
+    if secs[0][0] > 0:
+        norm.append([0, secs[0][0], ""])  # front matter before first heading
+    for i, (start, end, title) in enumerate(secs):
+        nxt = secs[i + 1][0] if i + 1 < len(secs) else total
+        if nxt > start:
+            norm.append([start, min(end, nxt), title])
+    if norm and norm[-1][1] < total:
+        norm[-1][1] = total
+    return [{"title": t, "ordinal": i, "start_char": a, "end_char": b}
+            for i, (a, b, t) in enumerate(norm)]
+
+
+def chunk_text_recursive(text: str, chunk_tokens: int = 330, overlap: int = 60,
+                         sections: list | None = None) -> list[dict]:
+    """Boundary-aware recursive chunker (parent_child strategy).
+
+    Splits at section -> paragraph -> sentence boundaries before falling back
+    to word-count, so a chunk never cuts mid-paragraph when a paragraph
+    boundary fits within the target size. Token counts are approximated by
+    whitespace words (same as chunk_text). No overlap is carried across a
+    section boundary.
+
+    Returns a list of {"text", "section_title", "section_ordinal"} dicts, one
+    per chunk, in document order.
+    """
+    text = text or ""
+    if not text.strip():
+        return []
+    out = []
+    for sec in _normalize_sections(sections, len(text)):
+        body = text[sec["start_char"]:sec["end_char"]]
+        paragraphs = [re.sub(r"\s+", " ", p).strip()
+                      for p in re.split(r"\n\s*\n", body)]
+        paragraphs = [p for p in paragraphs if p]
+        if not paragraphs:
+            continue
+        for chunk in _pack_pieces(
+                paragraphs, chunk_tokens, overlap,
+                big_piece_splitter=lambda p: _pack_pieces(
+                    _split_sentences(p), chunk_tokens, overlap)):
+            out.append({"text": chunk,
+                        "section_title": sec["title"],
+                        "section_ordinal": sec["ordinal"]})
+    return out
+
+
+def build_parent_text(body: str, parent_tokens: int = 1200) -> str:
+    """Parent (generation) text for one section (chunking_strategy:
+    parent_child).
+
+    Paragraphs are normalized exactly like the recursive chunker and joined
+    with blank lines, then capped at ``parent_tokens`` words (word ≈ token
+    approximation, same as chunk_tokens). Sections shorter than the cap are
+    stored whole; sections longer than it lose their tail — the parent_id
+    scheme (one parent per section ordinal) is fixed by the child metadata,
+    so oversized sections are truncated rather than split into several
+    parents.
+    """
+    paras = [re.sub(r"\s+", " ", p).strip()
+             for p in re.split(r"\n\s*\n", body)]
+    paras = [p for p in paras if p]
+    if not paras:
+        return ""
+    text = "\n\n".join(paras)
+    words = text.split()
+    if len(words) > parent_tokens:
+        text = " ".join(words[:max(0, int(parent_tokens))])
+    return text
+
 # ─── Main Ingestion ──────────────────────────────────────────────────────────
 
 def ingest(target: str, set_name: str, cfg: dict, force: bool = False, only_path: str = None):
@@ -506,6 +888,15 @@ def ingest(target: str, set_name: str, cfg: dict, force: bool = False, only_path
     fiction_tags = cfg.get("fiction_tags", ["Fiction", "Short Stories", "Literary"])
     chunk_tokens = cfg.get("chunk_tokens", 500)
     chunk_overlap = cfg.get("chunk_overlap", 100)
+    parent_tokens = int(cfg.get("parent_tokens", 1200))
+    chunking_strategy = (cfg.get("chunking_strategy") or "flat").strip().lower()
+    if chunking_strategy not in ("flat", "parent_child"):
+        console.print(f"[yellow]Unknown chunking_strategy '{chunking_strategy}' - falling back to 'flat'[/yellow]")
+        chunking_strategy = "flat"
+    if chunking_strategy == "parent_child":
+        console.print("[dim]Chunking: parent_child (boundary-aware, section-aware splitter)[/dim]")
+    else:
+        console.print("[dim]Chunking: flat (word-count splitter, unchanged)[/dim]")
     embed_model = cfg.get("embed_model", "BAAI/bge-m3")
     ocr_threshold = cfg.get("ocr_char_threshold", 50)
     ocr_enabled = cfg.get("ocr_enabled", False)
@@ -661,12 +1052,40 @@ def ingest(target: str, set_name: str, cfg: dict, force: bool = False, only_path
                 console.print(f"[yellow][{idx}/{total}] Big file detected: {fpath.name} "
                               f"(~{est_chunks} chunks) - will process in batches[/yellow]")
 
-            # Chunk
-            chunks = chunk_text(text, chunk_tokens, chunk_overlap)
+            # Chunk. "flat" keeps the original word-count splitter (and chunk
+            # IDs) byte-for-byte; "parent_child" uses the boundary-aware
+            # recursive splitter and carries section metadata on each chunk.
+            if chunking_strategy == "parent_child":
+                chunked = chunk_text_recursive(text, chunk_tokens, chunk_overlap,
+                                               sections=text_meta.get("sections"))
+                chunks = [c["text"] for c in chunked]
+            else:
+                chunked = None
+                chunks = chunk_text(text, chunk_tokens, chunk_overlap)
             if not chunks:
                 print(f"[{idx}/{total}] SKIP (no chunks): {fpath.name}", flush=True)
                 skipped += 1
                 continue
+
+            # Parent chunks (parent_child only): one parent per normalized
+            # section ordinal, deterministic id shared with the child metadata.
+            parent_rows = []
+            if chunked is not None:
+                norm_secs = {s["ordinal"]: s for s in
+                             _normalize_sections(text_meta.get("sections"), len(text))}
+                for o in sorted({c["section_ordinal"] for c in chunked}):
+                    sec = norm_secs.get(o)
+                    body = text[sec["start_char"]:sec["end_char"]] if sec else ""
+                    parent_rows.append({
+                        "parent_id": hashlib.sha256(
+                            f"{rel}:section{o}".encode()).hexdigest()[:16],
+                        "set_name": set_name,
+                        "source": rel,
+                        "title": finfo["title"],
+                        "section_title": sec["title"] if sec else "",
+                        "section_ordinal": o,
+                        "text": build_parent_text(body, parent_tokens),
+                    })
 
             # Oversized single file (e.g. complete-works omnibus): handled below by
             # processing across multiple embed/upsert batches instead of skipping.
@@ -674,9 +1093,22 @@ def ingest(target: str, set_name: str, cfg: dict, force: bool = False, only_path
                 print(f"[{idx}/{total}] BIG: {fpath.name} ({len(chunks)} chunks) - "
                       f"processing in batches of {batch_size}", flush=True)
 
+            # Drop any chunks previously stored for this file (deterministic ids
+            # re-upsert in place, but a changed chunking/strategy can change the
+            # chunk count, so stale tail chunks must be removed first).
+            try:
+                collection.delete(where={"source": rel})
+            except Exception as e:
+                print(f"[{idx}/{total}] WARN delete-stale failed for {fpath.name}: {e}",
+                      flush=True)
+
             # Embed + upsert in batches. Chroma has a hard per-call limit (~5461), so
             # any file - including huge omnibuses - is processed across multiple calls
             # instead of a single one. Chunk IDs stay deterministic (rel:index).
+            # Also write BM25 token data for persistent lexical index.
+            manifest.remove_bm25_tokens(rel, set_name)
+            if chunked is not None:
+                manifest.remove_parents(rel, set_name)
             for start in range(0, len(chunks), batch_size):
                 batch = chunks[start:start + batch_size]
                 with torch.no_grad():
@@ -694,7 +1126,7 @@ def ingest(target: str, set_name: str, cfg: dict, force: bool = False, only_path
                     all_ids.append(chunk_id)
                     all_docs.append(chunk)
                     all_embeddings.append(emb)
-                    all_metadatas.append({
+                    metadata = {
                         "source": rel,
                         "title": finfo["title"],
                         "kind": finfo["kind"],
@@ -702,7 +1134,17 @@ def ingest(target: str, set_name: str, cfg: dict, force: bool = False, only_path
                         "set": set_name,
                         "chunk_index": abs_index,
                         "total_chunks": len(chunks),
-                    })
+                    }
+                    if chunked is not None:
+                        # Deterministic parent placeholder (real parents store
+                        # lands in Session 5): section-level id, same scheme.
+                        ci = chunked[abs_index]
+                        metadata["section_title"] = ci["section_title"]
+                        metadata["section_ordinal"] = ci["section_ordinal"]
+                        metadata["parent_id"] = hashlib.sha256(
+                            f"{rel}:section{ci['section_ordinal']}".encode()
+                        ).hexdigest()[:16]
+                    all_metadatas.append(metadata)
 
                 collection.upsert(
                     ids=all_ids,
@@ -710,6 +1152,16 @@ def ingest(target: str, set_name: str, cfg: dict, force: bool = False, only_path
                     embeddings=all_embeddings,
                     metadatas=all_metadatas,
                 )
+
+                for cid, chunk_text_str in zip(all_ids, all_docs):
+                    manifest.write_bm25_tokens(cid, tokenize(chunk_text_str), set_name)
+
+            manifest.rebuild_bm25_df(set_name)
+
+            # Persist parents only after the child embed/upsert succeeded, so a
+            # failed file never leaves parents without children.
+            if parent_rows:
+                manifest.write_parents(parent_rows)
 
             # Update manifest
             manifest.upsert(rel, str(fpath), finfo["mtime"], finfo["size"],

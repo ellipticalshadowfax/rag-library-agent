@@ -170,8 +170,8 @@ mcp = FastMCP("rag-library", instructions=(
 @mcp.tool()
 def list_collections() -> str:
     """List the available library index collections (set names) and how many
-    chunks each holds. Use this to discover a valid `set_name` for the other
-    tools."""
+    chunks each holds. Call this first if you need to know which set_name
+    to pass to search_library or summarize_work."""
     out = []
     for name in list_collection_names():
         try:
@@ -183,16 +183,18 @@ def list_collections() -> str:
 
 
 @mcp.tool()
-def search_library(query: str, set_name: str | None = None, top_k: int = 6,
-                   filter_kind: str | None = None) -> str:
-    """Search the user's e-book library index and return the most relevant
-    excerpts. Call this to ground an answer in the user's books.
+def search_library(query: str, set_name: str = "", top_k: int = 6,
+                   filter_kind: str = "") -> str:
+    """ALWAYS call this tool before answering any question about the user's books
+    or library. It retrieves relevant excerpts from the user's e-book collection.
+    Never answer from your own knowledge alone when the user asks about their
+    library — search first, then cite the source titles from the results.
 
     Args:
       query: the question or search phrase (natural language).
-      set_name: which index collection to search (see list_collections).
+      set_name: which index collection to search (see list_collections). Leave empty for the default.
       top_k: how many excerpts to return (1-8).
-      filter_kind: optional 'fiction' or 'nonfiction' to restrict results.
+      filter_kind: 'fiction' or 'nonfiction' to restrict results, or leave empty for all.
     """
     agent = _load_agent()
     cfg = agent.load_config()
@@ -203,7 +205,7 @@ def search_library(query: str, set_name: str | None = None, top_k: int = 6,
     pool_k = min(top_k * 3, 24)
     with _muted_stdout():
         hits = agent.retrieve(query, _embedder(), collection, top_k=pool_k,
-                              filter_kind=filter_kind, cfg=cfg)
+                              filter_kind=filter_kind or None, cfg=cfg)
     hits = agent.diversify_hits(hits, limit=top_k)
     if not hits:
         return ("(No matching documents were retrieved from the library for "
@@ -236,13 +238,13 @@ def search_library(query: str, set_name: str | None = None, top_k: int = 6,
 
 
 @mcp.tool()
-def summarize_work(title: str, set_name: str | None = None, top_k: int = 8) -> str:
+def summarize_work(title: str, set_name: str = "", top_k: int = 8) -> str:
     """Retrieve excerpts of ONE named work (book) from the library so the model
     can summarize or discuss it specifically.
 
     Args:
       title: the title (or distinctive part of it) of the book.
-      set_name: which index collection (see list_collections).
+      set_name: which index collection (see list_collections). Leave empty for the default.
       top_k: how many excerpts to return (1-10).
     """
     agent = _load_agent()

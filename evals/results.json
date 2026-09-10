@@ -1,0 +1,514 @@
+{
+  "generated_at": "2026-09-10T16:05:43.725103+00:00",
+  "top_k": 10,
+  "num_queries": 22,
+  "sets": [
+    "nlp_books",
+    "library"
+  ],
+  "metrics": {
+    "hit@5": 1.0,
+    "hit@10": 1.0,
+    "mrr@5": 0.9545,
+    "mrr@10": 0.9545,
+    "context_recall": 1.0,
+    "context_precision": 0.6568
+  },
+  "queries": [
+    {
+      "query": "Summarize the quest of Bilbo Baggins and the dwarves",
+      "expected_title": "The Hobbit",
+      "set": "library",
+      "filter_kind": null,
+      "metrics": {
+        "hit@5": 1.0,
+        "mrr@5": 1.0,
+        "hit@10": 1.0,
+        "mrr@10": 1.0,
+        "context_recall": 1.0,
+        "context_precision": 0.5
+      },
+      "retrieval": {
+        "num_hits": 4,
+        "title_mode": false,
+        "matched_titles": [],
+        "fiction_only": true,
+        "low_relevance": true,
+        "relevance_reason": "query terms not found in retrieved sources: Summarize, baggin, dwarve"
+      }
+    },
+    {
+      "query": "What is the fate of Captain Ahab and the white whale?",
+      "expected_title": "Moby Dick; Or, The Whale",
+      "set": "library",
+      "filter_kind": null,
+      "metrics": {
+        "hit@5": 1.0,
+        "mrr@5": 1.0,
+        "hit@10": 1.0,
+        "mrr@10": 1.0,
+        "context_recall": 1.0,
+        "context_precision": 1.0
+      },
+      "retrieval": {
+        "num_hits": 3,
+        "title_mode": false,
+        "matched_titles": [],
+        "fiction_only": true,
+        "low_relevance": false,
+        "relevance_reason": ""
+      }
+    },
+    {
+      "query": "In Flatland what is the world of only two dimensions called",
+      "expected_title": "Flatland : a romance of many dimensions",
+      "set": "library",
+      "filter_kind": null,
+      "metrics": {
+        "hit@5": 1.0,
+        "mrr@5": 1.0,
+        "hit@10": 1.0,
+        "mrr@10": 1.0,
+        "context_recall": 1.0,
+        "context_precision": 0.25
+      },
+      "retrieval": {
+        "num_hits": 5,
+        "title_mode": false,
+        "matched_titles": [],
+        "fiction_only": false,
+        "low_relevance": false,
+        "relevance_reason": ""
+      }
+    },
+    {
+      "query": "Describe the great old one Cthulhu and its cultists",
+      "expected_title": "The Call of Cthulhu",
+      "set": "library",
+      "filter_kind": null,
+      "metrics": {
+        "hit@5": 1.0,
+        "mrr@5": 1.0,
+        "hit@10": 1.0,
+        "mrr@10": 1.0,
+        "context_recall": 1.0,
+        "context_precision": 0.5
+      },
+      "retrieval": {
+        "num_hits": 4,
+        "title_mode": false,
+        "matched_titles": [],
+        "fiction_only": false,
+        "low_relevance": false,
+        "relevance_reason": ""
+      }
+    },
+    {
+      "query": "Why are books burned in the dystopian society?",
+      "expected_title": "Fahrenheit 451",
+      "set": "library",
+      "filter_kind": null,
+      "metrics": {
+        "hit@5": 1.0,
+        "mrr@5": 1.0,
+        "hit@10": 1.0,
+        "mrr@10": 1.0,
+        "context_recall": 1.0,
+        "context_precision": 0.5
+      },
+      "retrieval": {
+        "num_hits": 4,
+        "title_mode": false,
+        "matched_titles": [],
+        "fiction_only": false,
+        "low_relevance": false,
+        "relevance_reason": ""
+      }
+    },
+    {
+      "query": "How does Ender win the final war against the buggers?",
+      "expected_title": "Ender's Game",
+      "set": "library",
+      "filter_kind": null,
+      "metrics": {
+        "hit@5": 1.0,
+        "mrr@5": 0.5,
+        "hit@10": 1.0,
+        "mrr@10": 0.5,
+        "context_recall": 1.0,
+        "context_precision": 0.5
+      },
+      "retrieval": {
+        "num_hits": 4,
+        "title_mode": false,
+        "matched_titles": [],
+        "fiction_only": true,
+        "low_relevance": true,
+        "relevance_reason": "query terms not found in retrieved sources: doe"
+      }
+    },
+    {
+      "query": "What future does the Time Machine reveal about humanity?",
+      "expected_title": "The Time Machine",
+      "set": "library",
+      "filter_kind": null,
+      "metrics": {
+        "hit@5": 1.0,
+        "mrr@5": 1.0,
+        "hit@10": 1.0,
+        "mrr@10": 1.0,
+        "context_recall": 1.0,
+        "context_precision": 0.5
+      },
+      "retrieval": {
+        "num_hits": 4,
+        "title_mode": true,
+        "matched_titles": [
+          "The Future of the Human Mind: A Study of the Potential Powers of the Brain (George Estabrooks, Nancy E. Gross) (Z-Library)",
+          "Profit First: A Simple System To Transform Any Business From A Cash-Eating Monster To A Money-Making Machine",
+          "The Time Machine",
+          "Puppy Basic Manners Priorities for Future Service Dogs"
+        ],
+        "fiction_only": false,
+        "low_relevance": false,
+        "relevance_reason": ""
+      }
+    },
+    {
+      "query": "Which mysteries does Sherlock Holmes solve with his methods?",
+      "expected_title": "The Adventures of Sherlock Holmes",
+      "set": "library",
+      "filter_kind": null,
+      "metrics": {
+        "hit@5": 1.0,
+        "mrr@5": 0.5,
+        "hit@10": 1.0,
+        "mrr@10": 0.5,
+        "context_recall": 1.0,
+        "context_precision": 0.5
+      },
+      "retrieval": {
+        "num_hits": 4,
+        "title_mode": false,
+        "matched_titles": [],
+        "fiction_only": true,
+        "low_relevance": true,
+        "relevance_reason": "query terms not found in retrieved sources: mysterie, doe, holme"
+      }
+    },
+    {
+      "query": "Describe Jay Gatsby's opulent parties and his love for Daisy",
+      "expected_title": "The Great Gatsby",
+      "set": "library",
+      "filter_kind": null,
+      "metrics": {
+        "hit@5": 1.0,
+        "mrr@5": 1.0,
+        "hit@10": 1.0,
+        "mrr@10": 1.0,
+        "context_recall": 1.0,
+        "context_precision": 1.0
+      },
+      "retrieval": {
+        "num_hits": 3,
+        "title_mode": false,
+        "matched_titles": [],
+        "fiction_only": true,
+        "low_relevance": true,
+        "relevance_reason": "query terms not found in retrieved sources: opulent, partie"
+      }
+    },
+    {
+      "query": "What regions of the ocean does the Nautilus explore?",
+      "expected_title": "Twenty Thousand Leagues under the Sea",
+      "set": "library",
+      "filter_kind": null,
+      "metrics": {
+        "hit@5": 1.0,
+        "mrr@5": 1.0,
+        "hit@10": 1.0,
+        "mrr@10": 1.0,
+        "context_recall": 1.0,
+        "context_precision": 0.5
+      },
+      "retrieval": {
+        "num_hits": 4,
+        "title_mode": false,
+        "matched_titles": [],
+        "fiction_only": true,
+        "low_relevance": true,
+        "relevance_reason": "query terms not found in retrieved sources: doe, nautilu"
+      }
+    },
+    {
+      "query": "How is Black Beauty treated by his successive owners?",
+      "expected_title": "Black Beauty",
+      "set": "library",
+      "filter_kind": null,
+      "metrics": {
+        "hit@5": 1.0,
+        "mrr@5": 1.0,
+        "hit@10": 1.0,
+        "mrr@10": 1.0,
+        "context_recall": 1.0,
+        "context_precision": 1.0
+      },
+      "retrieval": {
+        "num_hits": 4,
+        "title_mode": true,
+        "matched_titles": [
+          "Black Beauty"
+        ],
+        "fiction_only": true,
+        "low_relevance": false,
+        "relevance_reason": ""
+      }
+    },
+    {
+      "query": "Who is the nervous rabbit friend of Winnie-the-Pooh?",
+      "expected_title": "Winnie-the-Pooh",
+      "set": "library",
+      "filter_kind": null,
+      "metrics": {
+        "hit@5": 1.0,
+        "mrr@5": 1.0,
+        "hit@10": 1.0,
+        "mrr@10": 1.0,
+        "context_recall": 1.0,
+        "context_precision": 1.0
+      },
+      "retrieval": {
+        "num_hits": 4,
+        "title_mode": true,
+        "matched_titles": [
+          "Winnie-the-Pooh"
+        ],
+        "fiction_only": true,
+        "low_relevance": false,
+        "relevance_reason": ""
+      }
+    },
+    {
+      "query": "Which strange nations does Gulliver visit on his voyages?",
+      "expected_title": "Gulliver's Travels into Several Remote Nations of the World",
+      "set": "library",
+      "filter_kind": null,
+      "metrics": {
+        "hit@5": 1.0,
+        "mrr@5": 1.0,
+        "hit@10": 1.0,
+        "mrr@10": 1.0,
+        "context_recall": 1.0,
+        "context_precision": 0.5
+      },
+      "retrieval": {
+        "num_hits": 4,
+        "title_mode": false,
+        "matched_titles": [],
+        "fiction_only": true,
+        "low_relevance": true,
+        "relevance_reason": "query terms not found in retrieved sources: doe"
+      }
+    },
+    {
+      "query": "How does the Martian invasion of England come to an end?",
+      "expected_title": "The War of the Worlds",
+      "set": "library",
+      "filter_kind": null,
+      "metrics": {
+        "hit@5": 1.0,
+        "mrr@5": 1.0,
+        "hit@10": 1.0,
+        "mrr@10": 1.0,
+        "context_recall": 1.0,
+        "context_precision": 0.5
+      },
+      "retrieval": {
+        "num_hits": 4,
+        "title_mode": false,
+        "matched_titles": [],
+        "fiction_only": false,
+        "low_relevance": true,
+        "relevance_reason": "query terms not found in retrieved sources: doe"
+      }
+    },
+    {
+      "query": "Milton epic poem paradise lost the fall of satan and adam and eve",
+      "expected_title": "Paradise Lost",
+      "set": "library",
+      "filter_kind": null,
+      "metrics": {
+        "hit@5": 1.0,
+        "mrr@5": 1.0,
+        "hit@10": 1.0,
+        "mrr@10": 1.0,
+        "context_recall": 1.0,
+        "context_precision": 1.0
+      },
+      "retrieval": {
+        "num_hits": 4,
+        "title_mode": true,
+        "matched_titles": [
+          "Paradise Lost"
+        ],
+        "fiction_only": true,
+        "low_relevance": false,
+        "relevance_reason": ""
+      }
+    },
+    {
+      "query": "landscape photography creative elements and darkroom techniques",
+      "expected_title": "Creative Elements: Landscape Photography, Darkroom Techniques (Photography)",
+      "set": "library",
+      "filter_kind": null,
+      "metrics": {
+        "hit@5": 1.0,
+        "mrr@5": 1.0,
+        "hit@10": 1.0,
+        "mrr@10": 1.0,
+        "context_recall": 1.0,
+        "context_precision": 0.2
+      },
+      "retrieval": {
+        "num_hits": 5,
+        "title_mode": false,
+        "matched_titles": [],
+        "fiction_only": false,
+        "low_relevance": false,
+        "relevance_reason": ""
+      }
+    },
+    {
+      "query": "Describe the basic principles of riding and judging in dressage",
+      "expected_title": "The Art of Dressage: Basic Principles of Riding and Judging",
+      "set": "library",
+      "filter_kind": null,
+      "metrics": {
+        "hit@5": 1.0,
+        "mrr@5": 1.0,
+        "hit@10": 1.0,
+        "mrr@10": 1.0,
+        "context_recall": 1.0,
+        "context_precision": 0.5
+      },
+      "retrieval": {
+        "num_hits": 4,
+        "title_mode": false,
+        "matched_titles": [],
+        "fiction_only": false,
+        "low_relevance": true,
+        "relevance_reason": "query terms not found in retrieved sources: Describe"
+      }
+    },
+    {
+      "query": "How does Sun Tzu recommend defeating an enemy through deception?",
+      "expected_title": "The Art of War",
+      "set": "library",
+      "filter_kind": "nonfiction",
+      "metrics": {
+        "hit@5": 1.0,
+        "mrr@5": 1.0,
+        "hit@10": 1.0,
+        "mrr@10": 1.0,
+        "context_recall": 1.0,
+        "context_precision": 1.0
+      },
+      "retrieval": {
+        "num_hits": 4,
+        "title_mode": false,
+        "matched_titles": [],
+        "fiction_only": false,
+        "low_relevance": true,
+        "relevance_reason": "query terms not found in retrieved sources: doe"
+      }
+    },
+    {
+      "query": "book on hypnotism methods of inducing hypnosis and suggestions",
+      "expected_title": "Hypnotism - How To Hypnotise People",
+      "set": "nlp_books",
+      "filter_kind": null,
+      "metrics": {
+        "hit@5": 1.0,
+        "mrr@5": 1.0,
+        "hit@10": 1.0,
+        "mrr@10": 1.0,
+        "context_recall": 1.0,
+        "context_precision": 1.0
+      },
+      "retrieval": {
+        "num_hits": 1,
+        "title_mode": false,
+        "matched_titles": [],
+        "fiction_only": false,
+        "low_relevance": true,
+        "relevance_reason": "query terms not found in retrieved sources: inducing, hypnosi"
+      }
+    },
+    {
+      "query": "How can body language and gestures reveal what someone is thinking?",
+      "expected_title": "Allan Peas - Body Language How To Read Others Thoughts By Their Gestures",
+      "set": "nlp_books",
+      "filter_kind": null,
+      "metrics": {
+        "hit@5": 1.0,
+        "mrr@5": 1.0,
+        "hit@10": 1.0,
+        "mrr@10": 1.0,
+        "context_recall": 1.0,
+        "context_precision": 0.5
+      },
+      "retrieval": {
+        "num_hits": 4,
+        "title_mode": false,
+        "matched_titles": [],
+        "fiction_only": false,
+        "low_relevance": false,
+        "relevance_reason": ""
+      }
+    },
+    {
+      "query": "brainwashing manual how to manipulate and brainwash beliefs",
+      "expected_title": "The Brainwashing Manual",
+      "set": "nlp_books",
+      "filter_kind": null,
+      "metrics": {
+        "hit@5": 1.0,
+        "mrr@5": 1.0,
+        "hit@10": 1.0,
+        "mrr@10": 1.0,
+        "context_recall": 1.0,
+        "context_precision": 0.5
+      },
+      "retrieval": {
+        "num_hits": 4,
+        "title_mode": false,
+        "matched_titles": [],
+        "fiction_only": false,
+        "low_relevance": true,
+        "relevance_reason": "query terms not found in retrieved sources: brainwash"
+      }
+    },
+    {
+      "query": "How can meta states be used to accelerate NLP change work?",
+      "expected_title": "Accelerating NLP Using Meta States",
+      "set": "nlp_books",
+      "filter_kind": null,
+      "metrics": {
+        "hit@5": 1.0,
+        "mrr@5": 1.0,
+        "hit@10": 1.0,
+        "mrr@10": 1.0,
+        "context_recall": 1.0,
+        "context_precision": 1.0
+      },
+      "retrieval": {
+        "num_hits": 3,
+        "title_mode": false,
+        "matched_titles": [],
+        "fiction_only": false,
+        "low_relevance": false,
+        "relevance_reason": ""
+      }
+    }
+  ]
+}

@@ -94,6 +94,11 @@ def default_cfg():
         "embed_dim": 384,
         "chunk_tokens": 330,
         "chunk_overlap": 60,
+        "chunking_strategy": "flat",
+        "parent_tokens": 1200,
+        "agentic_enabled": True,
+        "agentic_max_steps": 3,
+        "agentic_strategy": "auto",
         "llm_base_url": "http://localhost:1234/v1",
         "llm_model": "default",
         "llm_api_key": None,
@@ -509,96 +514,6 @@ def get_chat_reranker():
     return _reranker["obj"]
 
 
-# ─── Hybrid retrieval (BM25 lexical leg + RRF fusion) ────────────────────────
-
-BM25_TOP_N = 30
-BM25_BATCH = 20000
-FUSE_RRF_K = 60
-
-_bm25_cache = {}  # set_name -> {"bm25": BM25Okapi, "ids": [chunk ids aligned to corpus]}
-
-
-def _get_bm25_index(set_name):
-    cached = _bm25_cache.get(set_name)
-    if cached is not None:
-        return cached
-    collection = get_chat_collection(set_name)
-    count = collection.count()
-    print(f"[chat] building BM25 index for '{set_name}' ({count} chunks)...", flush=True)
-    ids, tokdocs = [], []
-    offset = 0
-    df = {}
-    stamp = __import__("agent", fromlist=["tokenize"]).tokenize
-    while True:
-        res = collection.get(limit=BM25_BATCH, offset=offset, include=["documents"])
-        batch_ids = res.get("ids") or []
-        batch_docs = res.get("documents") or []
-        if not batch_ids:
-            break
-        for cid, txt in zip(batch_ids, batch_docs):
-            toks = stamp(txt or "")
-            if toks:
-                ids.append(cid)
-                tokdocs.append(toks)
-                for tk in set(toks):
-                    df[tk] = df.get(tk, 0) + 1
-        offset += len(batch_ids)
-        if len(batch_ids) < BM25_BATCH:
-            break
-    from rank_bm25 import BM25Okapi
-    bm25 = BM25Okapi(tokdocs)
-    print(f"[chat] BM25 index ready ({len(ids)} docs).", flush=True)
-    _bm25_cache[set_name] = {"bm25": bm25, "ids": ids, "df": df}
-    return _bm25_cache[set_name]
-
-
-def _bm25_leg(set_name, query, skip_ids, n=BM25_TOP_N):
-    """Return hits for the top-n BM25 results not already in the dense pool."""
-    idx = _get_bm25_index(set_name)
-    toks = __import__("agent", fromlist=["tokenize"]).tokenize(query)
-    if not toks:
-        return []
-    scores = idx["bm25"].get_scores(toks)
-    top = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:n]
-
-    missing = [idx["ids"][i] for i in top if idx["ids"][i] not in skip_ids]
-    meta_by_id, doc_by_id = {}, {}
-    if missing:
-        collection = get_chat_collection(set_name)
-        res = collection.get(ids=missing, include=["documents", "metadatas"])
-        for cid, m in zip(res.get("ids") or [], res.get("metadatas") or []):
-            meta_by_id[cid] = m
-        for cid, d in zip(res.get("ids") or [], res.get("documents") or []):
-            doc_by_id[cid] = d
-
-    hits = []
-    for i in top:
-        cid = idx["ids"][i]
-        if cid in skip_ids:
-            continue
-        hits.append({
-            "id": cid,
-            "document": doc_by_id.get(cid, ""),
-            "metadata": meta_by_id.get(cid, {}),
-            "distance": None,
-            "bm25_score": float(scores[i]),
-        })
-    return hits
-
-
-def _rrf_fuse(*ranked_lists, k=FUSE_RRF_K):
-    acc = {}
-    for lst in ranked_lists:
-        for rank, hit in enumerate(lst):
-            acc[hit["id"]] = acc.get(hit["id"], 0.0) + 1.0 / (k + rank + 1)
-    by_id = {}
-    for lst in ranked_lists:
-        for hit in lst:
-            by_id.setdefault(hit["id"], hit)
-    order = sorted(acc, key=acc.get, reverse=True)
-    return [by_id[cid] for cid in order]
-
-
 # ─── Flask routes ────────────────────────────────────────────────────────────
 
 @app.route("/")
@@ -623,6 +538,7 @@ def api_config_set():
     # Only allow whitelisted keys to update
     allowed = {
         "embed_model", "embed_device", "embed_dim", "chunk_tokens", "chunk_overlap",
+        "chunking_strategy", "parent_tokens",
         "llm_base_url", "llm_model", "llm_api_key", "llm_temperature", "llm_max_tokens",
         "retrieval_top_k", "relevance_threshold", "max_retrieval_hops",
         "retrieval_hops_driver",
@@ -1147,77 +1063,6 @@ def api_ocr_control():
     return jsonify({"ok": False, "message": "Unknown action."}), 400
 
 
-# Bound the prompt size: LM Studio's default window is 8192 tokens and the
-# Qwen tokenizer is ~3 tokens/word. cap scored hits by words so the total
-# prompt stays well under any default context window.
-_QUERY_STOP = set(
-    "the a an and or of to in on for with by from at as is are be was were it its his her "
-    "they their them what which whose when where how why this that these those book books "
-    "summarize summary synopsis overview about tell explain give best all any some my your "
-    "me please can you does do would should".split()
-)
-
-# Verbs/phrases that make a query clearly work-directed (asking to see/summarize
-# specific works) rather than a general content question.
-_WORK_DIRECTED = ("summarize", "summary", "synopsis", "overview", "recap",
-                  "about", "spoiler", "review", "contents", "chapters", "compare")
-
-
-def _is_work_directed(query: str, q: str) -> bool:
-    if any(w in q.split() for w in _WORK_DIRECTED):
-        return True
-    return bool(re.search(r"\b(the|this)\s+\w+\s+(book|novel|series)$", query.lower()))
-
-
-def _match_titles(query: str, set_name: str, limit: int = 4) -> list[str]:
-    """Match a query against the known book titles in this set (manifest.db).
-
-    Enables "specific work" retrieval: naming one work (or a small cluster of
-    works) routes the query straight to those books' chunks instead of letting
-    the weak embedder scatter across the whole collection.
-    Returns matched titles, best first.
-    """
-    db = RAG_ROOT / "manifest.db"
-    if not db.exists():
-        return []
-    try:
-        con = sqlite3.connect(db)
-        rows = con.execute(
-            "SELECT DISTINCT title FROM files WHERE set_name=? AND title IS NOT NULL AND title<>''",
-            (set_name,)).fetchall()
-        con.close()
-    except Exception as e:
-        print(f"[chat] manifest title lookup failed: {e}")
-        return []
-
-    q = re.sub(r"[^a-z0-9 ]", " ", query.lower()).strip()
-    qwords = {w for w in q.split() if w not in _QUERY_STOP}
-    work_directed = _is_work_directed(query, q)
-    scored = []
-    for (title,) in rows:
-        t = re.sub(r"[^a-z0-9 ]", " ", title.lower()).strip()
-        if len(t) < 3:
-            continue
-        twords = {w for w in t.split() if w not in _QUERY_STOP}
-        if t in q or q in t:
-            score = 100 + len(t)           # full-title containment: decisive
-        elif not work_directed:
-            continue                       # topic question: stay on the normal RAG path
-        elif len(twords) >= 2 and len(twords & qwords) >= 2:
-            score = 60 + len(t)            # work-directed + solid word overlap
-        elif len(twords & qwords) == 1 and len((twords & qwords).pop()) >= 5:
-            score = 40 + len(t)            # work-directed + single distinctive 5+ char word
-        else:
-            continue
-        scored.append((score, title))
-    scored.sort(key=lambda x: (-x[0], x[1]))
-    return [t for _, t in scored[:limit]]
-
-
-CONTEXT_WORD_BUDGET = 1500
-CHUNK_WORD_CAP = 240
-
-
 def default_set_name():
     """Best default collection name for chat when none is specified."""
     cfg = load_cfg()
@@ -1245,124 +1090,24 @@ def _prepare_rag(set_name, query, top_k, filter_kind, history=None):
     if collection.count() == 0:
         return {"error": f"Collection '{set_name}' is empty."}
 
-    top_k = min(top_k, 8)
-    pool_k = min(top_k * 3, 30)
     embedder = get_chat_embedder()
     agent_mod = __import__("agent", fromlist=[
-        "retrieve", "retrieve_multi_hop", "build_context",
-        "detect_low_relevance", "diversify_hits", "rerank_hits", "SYSTEM_PROMPT"])
+        "retrieve_rag", "SYSTEM_PROMPT"])
 
-    # Specific-work routing: if the query names one (or a few) known titles,
-    # confine retrieval to chunks of exactly those works.
-    matched_titles = _match_titles(query, set_name)
-    title_mode = len(matched_titles) > 0
-    where_title = {"title": {"$in": matched_titles}} if title_mode else None
+    rag_result = agent_mod.retrieve_rag(
+        set_name, query, top_k, filter_kind, cfg,
+        embedder=embedder, collection=collection,
+        client=get_chat_client(),
+        reranker=get_chat_reranker(),
+    )
 
-    if title_mode:
-        try:
-            hits = agent_mod.retrieve(query, embedder, collection, top_k=pool_k,
-                                      filter_kind=filter_kind, cfg=cfg,
-                                      where_extra=where_title)
-        except Exception as e:
-            print(f"[chat] title-gated retrieval failed, falling back: {e}")
-            hits = []
-        if not hits:
-            title_mode = False
-    else:
-        hits = []
-
-    if not title_mode:
-        hops = int(cfg.get("max_retrieval_hops", 1) or 1)
-        if hops > 1 and cfg.get("retrieval_hops_driver", "llm") == "llm":
-            try:
-                hits = agent_mod.retrieve_multi_hop(
-                    query, embedder, collection, client=get_chat_client(),
-                    cfg=cfg, top_k=pool_k, filter_kind=filter_kind)
-            except Exception as e:
-                print(f"[chat] multi-hop retrieval failed, falling back to single pass: {e}")
-                hits = agent_mod.retrieve(query, embedder, collection, top_k=pool_k,
-                                          filter_kind=filter_kind, cfg=cfg)
-        else:
-            hits = agent_mod.retrieve(query, embedder, collection, top_k=pool_k,
-                                      filter_kind=filter_kind, cfg=cfg)
-
-        # Lexical leg: BM25 hybrid + RRF fusion over (dense pool, BM25 top-ups).
-        try:
-            bm25_hits = _bm25_leg(set_name, query, {h["id"] for h in hits})
-        except Exception as e:
-            print(f"[chat] bm25 leg failed: {e}")
-            bm25_hits = []
-        if bm25_hits:
-            dense = sorted(hits, key=lambda h: h.get("distance")
-                           if h.get("distance") is not None else 2.0)
-            bm = sorted(bm25_hits, key=lambda h: h["bm25_score"], reverse=True)
-            hits = _rrf_fuse(dense, bm)[:max(pool_k, 40)]
-
-        # Cross-encoder rerank of fused candidates.
-        reranker = get_chat_reranker()
-        if reranker is not None:
-            hits, _ = agent_mod.rerank_hits(hits, query, reranker, top_n=24)
-
-    # Assess relevance against the full candidate pool (pre-diversify) so the
-    # guard sees every chunk that could carry a decisive query term — trimming
-    # the context must not silently drop the term and trip a false positive.
-    common_terms = set()
-    try:
-        idx = _get_bm25_index(set_name)
-        n = max(idx["bm25"].corpus_size, 1)
-        common_terms = {t for t, f in idx["df"].items() if f / n >= 0.01}
-    except Exception as e:
-        print(f"[chat] common-terms build failed: {e}")
-    low_rel, low_reason = agent_mod.detect_low_relevance(
-        query, hits, cfg, common_terms=common_terms)
-
-    # Diversify: drop duplicate/over-represented chunks of one title, spread
-    # results across books, then trim back to top_k. In specific-work mode keep
-    # more chunks of the matched work so summaries have real coverage.
-    max_per_title = 8 if title_mode else None
-    hits = agent_mod.diversify_hits(hits, limit=top_k if not title_mode else None,
-                                    max_per_title=max_per_title)
-
-    if not hits:
-        context = "(No relevant documents were found in the library for this query.)"
-        sources = []
-        fiction_only = False
-    else:
-        # Keep the highest-scoring hits that fit the word budget
-        kept, used = [], 0
-        for h in hits:
-            if used + len(h["document"].split()) > CONTEXT_WORD_BUDGET:
-                break
-            kept.append(h)
-            used += len(h["document"].split())
-        hits = kept
-
-        fiction_hits = [h for h in hits if h["metadata"].get("kind") == "fiction"]
-        nonfiction_hits = [h for h in hits if h["metadata"].get("kind") != "fiction"]
-        fiction_only = bool(fiction_hits and not nonfiction_hits)
-        context = agent_mod.build_context(hits, max_words=CHUNK_WORD_CAP)
-
-        sources = []
-        seen_src = set()
-        for h in hits:
-            m = h["metadata"]
-            key = (m.get("title", "?"), m.get("source", "?"))
-            if key in seen_src:
-                continue  # dedupe repeated chunks of the same source
-            seen_src.add(key)
-            score = h.get("rerank_score")
-            if score is None and h.get("distance") is not None:
-                score = round(1 - h["distance"], 3)
-            elif score is not None:
-                score = round(float(score), 3)
-            sources.append({
-                "title": m.get("title", "?"),
-                "source": m.get("source", "?"),
-                "kind": m.get("kind", "unknown"),
-                "tags": m.get("tags", "[]"),
-                "score": score,
-                "snippet": h["document"][:300],
-            })
+    title_mode = rag_result["title_mode"]
+    matched_titles = rag_result["matched_titles"]
+    context = rag_result["message_context"]
+    fiction_only = rag_result["fiction_only"]
+    low_rel = rag_result["low_relevance"]
+    low_reason = rag_result["relevance_reason"]
+    sources = rag_result["sources"]
 
     # Specific-work mode: the query named real library titles, so ask for a
     # per-work summary instead of a general answered-from-context question.
@@ -1376,7 +1121,6 @@ def _prepare_rag(set_name, query, top_k, filter_kind, history=None):
             f"Retrieved excerpts:\n{context}")
         if fiction_only:
             user_msg += "\n\nNOTE: these works are FICTION. Present them as fiction, not fact."
-        low_rel, low_reason = False, ""
     else:
         user_msg = f"Question: {query}\n\nRetrieved context:\n{context}"
         if low_rel:
@@ -1404,13 +1148,37 @@ def run_rag_chat(set_name, query, top_k=None, filter_kind=None, history=None):
     """Blocking RAG chat. Returns (payload, http_code)."""
     if top_k is None:
         top_k = load_cfg().get("retrieval_top_k", 10)
+
+    cfg = load_cfg()
+    if cfg.get("agentic_enabled", True):
+        try:
+            agent_loop_mod = __import__("agent_loop", fromlist=["run_agent_loop"])
+            result = agent_loop_mod.run_agent_loop(
+                set_name, query, history, cfg, get_chat_client(),
+                top_k=top_k, filter_kind=filter_kind,
+                embedder=get_chat_embedder(),
+                collection=get_chat_collection(set_name),
+                reranker=get_chat_reranker(),
+            )
+            if result.get("error"):
+                return ({"error": result["error"], "sources": result.get("sources", [])}), 500
+            if not result.get("answer"):
+                return ({"error": "LLM returned no usable answer. Is the LLM API "
+                                 f"running and reachable at {cfg.get('llm_base_url')}?",
+                         "sources": []}), 500
+            return {"answer": result["answer"], "sources": result.get("sources", []),
+                    "fiction_only": result.get("fiction_only", False),
+                    "low_relevance": result.get("low_relevance", False),
+                    "relevance_reason": result.get("relevance_reason", "")}, 200
+        except Exception as e:
+            print(f"[chat] agentic loop failed ({e}); falling back to single-shot", flush=True)
+
     payload = _prepare_rag(set_name, query, top_k, filter_kind, history)
     if "error" in payload:
         return payload, 409 if "paused" in payload["error"] else 404
     if "answer" in payload and "messages" not in payload:
         return payload, 200
 
-    cfg = load_cfg()
     client = get_chat_client()
     answer = ""
     last_err = None
@@ -1552,7 +1320,26 @@ def api_openai_chat():
     if "answer" in payload and "messages" not in payload:
         return _openai_response(payload["answer"], model, payload["sources"])
 
-    cfg = load_cfg()
+    # Agentic loop (non-streaming) when enabled; otherwise single-shot.
+    if cfg.get("agentic_enabled", True):
+        try:
+            agent_loop_mod = __import__("agent_loop", fromlist=["run_agent_loop"])
+            result = agent_loop_mod.run_agent_loop(
+                set_name, query, history, cfg, get_chat_client(),
+                top_k=top_k, filter_kind=filter_kind,
+                embedder=get_chat_embedder(),
+                collection=get_chat_collection(set_name),
+                reranker=get_chat_reranker(),
+            )
+            if result.get("error"):
+                return jsonify({"error": {"message": result["error"],
+                                          "type": "server_error"}}), 500
+            if result.get("answer"):
+                return _openai_response(result["answer"], model,
+                                        result.get("sources", []))
+        except Exception as e:
+            print(f"[chat] agentic loop failed ({e}); using single-shot", flush=True)
+
     client = get_chat_client()
     answer = ""
     last_err = None
