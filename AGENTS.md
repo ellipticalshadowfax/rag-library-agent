@@ -15,19 +15,26 @@ repo. Do not introduce them back in.
 ## Layout
 - `scripts/server.py` — Flask backend (web server + all `/api/*` endpoints).
 - `scripts/agent.py` — chat helpers: retrieval, context building, the `SYSTEM_PROMPT`.
+- `scripts/agent_loop.py` — bounded agentic tool-calling loop for `/api/chat`:
+  lets the LLM call `search_library`, `get_section`, or `summarize_work` tools
+  mid-conversation. Falls back to a ReAct text protocol for models without
+  function-calling. Non-streaming; the SSE path stays on the single-shot path.
 - `scripts/ingest.py` — CLI indexer: walks a directory, extracts text, chunks,
   embeds (E5 prefixes), upserts into ChromaDB. Writes `manifest.db`. OCR-enabled
   ingests can merge OCR text back into the source PDF (`ocr_merge`).
 - `scripts/ocr.py` — CLI OCR tool (separate from ingest): OCRs scanned PDFs and
   either merges the text layer back into the original (`--mode merge`) or writes
   sidecar `.txt` files (`--mode sidecar`). Writes `.ocr.lock`, logs to `ocr.log`.
-  Driven by the web UI's OCR tab via `/api/ocr*`. The OCR engine is chosen by the
-  `ocr_backend` config (`tesseract` default, `rapidocr` optional). Tesseract is a
-  mamba/conda build; its binary lives at
-  `/tmp/opencode/mamba/envs/tess/bin/tesseract` (tessdata at
-  `/tmp/opencode/mamba/envs/tess/share/tessdata`), wired through
-  `ocr_compare.py` (`DEFAULT_TESS_BIN` / `_setup_tesseract`). Override with the
-  `TESSERACT_BIN` env var.
+  Driven by the web UI's OCR tab via `/api/ocr*`.
+- `scripts/ocr_compare.py` — compares Tesseract vs RapidOCR on a page sample of
+  every scanned PDF, picks the better engine per file, then OCRs the full file.
+  Writes `ocr_compare_report.json`. The OCR engine is chosen by the `ocr_backend`
+  config (`tesseract` default, `rapidocr` optional). Tesseract binary discovery:
+  `TESSERACT_BIN` env var > `DEFAULT_TESS_BIN` in code (which is a
+  machine-specific fallback — override with the env var on new machines).
+- `scripts/merge_ocr_into_pdf.py` — post-OCR utility: adds an invisible
+  (searchable) text layer to scanned PDFs from the cached `ocr/<stem>.txt` files.
+  Writes in place; only runs when the OCR cache exists and page count matches.
 - `scripts/scan.py` — CLI dry-run scanner (stats, OCR-need detection).
 - `scripts/chat_store.py` — JSON-file conversation persistence under
   `conversations/` (gitignored). The web UI and the OpenAI-compatible endpoint
@@ -39,12 +46,21 @@ repo. Do not introduce them back in.
   (the stdio JSON-RPC channel) — stray prints are diverted to stderr by
   `_muted_stdout()`; missing collections raise instead of `sys.exit`. Embedder +
   Chroma are cached per-process (loads on CPU).
+- `scripts/eval.py` — offline retrieval eval harness (no LLM calls). Scores
+  `hit@K`, `mrr@K`, `context_recall`, `context_precision` against
+  `evals/golden.jsonl`. Subcommands: `run`, `baseline`, `diff` (CI regression
+  gate — exits nonzero if metrics drop beyond tolerance).
+- `scripts/bench_embeddings.py` — benchmarks embedding models (speed + quality).
+- `scripts/bench_fast.py` — benchmarks fast CPU embedding models on real chunks.
+- `scripts/start_lmstudio.sh` — launches LM Studio headless at
+  `http://localhost:1234/v1`.
 - `web/index.html` — single-file SPA frontend (Setup/Scan/Ingest/Chat tabs,
   folder-picker dialog, global ingest-activity pill).
 - `config.json` — app config (embed model, LLM URL/model, chunking, sets).
 - `run.sh` — one-command launcher (venv + deps + model predownload + server).
 - `run_mcp.sh` — launcher for the MCP server (stdio by default, `--http` for remote).
-- `requirements.txt`, `README.md`.
+- `requirements.txt`, `requirements-gpu.txt`, `README.md`.
+- `evals/` — `golden.jsonl` (ground truth), `baseline.json`, `results.json`.
 
 ## How it runs
 - `./run.sh` (or `RAG_PORT=5000 RAG_HOST=0.0.0.0 ./run.sh`) creates `.venv`,
@@ -97,15 +113,22 @@ repo. Do not introduce them back in.
   single multi-chunk book collapses to ONE source entry (e.g. "summarize the
   MindStar book" shows 1 source) even though the context holds up to
   `max_per_title=8` chunks of it — that's intended, not a retrieval failure.
+- **Agentic loop**: `agent_loop.py` gives the LLM tool-calling access to
+  `search_library`, `get_section`, and `summarize_work`. Controlled by
+  `agentic_enabled` and `agentic_max_steps` (default 3) in `config.json`.
+  Falls back to a ReAct text protocol (`call: search_library(...)`) for models
+  or servers that lack function-calling. Non-streaming only; the SSE streaming
+  path in `server.py` stays on the single-shot retrieval path.
 
 ## Conventions / requirements
 - **NO machine-specific paths or PII.** Use placeholders (`/path/to/your/library`),
-  env vars (`RAG_PORT`, `RAG_HOST`, `LMSTUDIO_PORT`), or repo-relative paths
+  env vars (`RAG_PORT`, `RAG_HOST`, `LMSTUDIO_PORT`, `TESSERACT_BIN`),
+  or repo-relative paths
   (`Path(__file__).resolve().parent.parent / "index"`). The collection/set name
   `library` is used as a default identifier throughout — that is fine to keep.
 - Default LLM/embed settings live in `config.json`; don't hardcode URLs in scripts.
-- Runtime artifacts (`index/`, `manifest.db`, logs, `.venv/`) are gitignored — never
-  commit them.
+- Runtime artifacts (`index/`, `manifest.db`, logs, `.venv/`, `ocr/`,
+  `ocr_compare_report.json`) are gitignored — never commit them.
 - After editing Python, verify with `python -m py_compile`. After editing
   `web/index.html`'s inline JS, verify with `node --check`.
 
