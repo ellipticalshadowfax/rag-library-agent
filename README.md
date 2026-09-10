@@ -176,6 +176,56 @@ To rebuild from scratch (e.g. after changing the embedding model), delete `index
 and `manifest.db`, then re-run ingest. The Setup tab also has a "Force re-embed"
 option per file.
 
+## Comparison with similar RAG systems
+
+A lot of popular tools do "chat with your documents." Here's how this project
+sits alongside several well-known ones:
+
+| Feature | **RAG Library Agent** | **privateGPT / LocalGPT** | **AnythingLLM** | **LlamaIndex / LangChain** | **Verba (Weaviate)** | **RAGFlow** |
+|---------|:---:|:---:|:---:|:---:|:---:|:---:|
+| Fully local / no cloud | ✅ | ✅ | ✅ (self-host) | ✅ | ✅ | ✅ |
+| Purpose-built for large ebook/PDF libraries | ✅ | ⚠️ | ⚠️ | ❌ framework | ⚠️ | ⚠️ |
+| One-command setup | ✅ | ⚠️ | ✅ | ❌ | ⚠️ | ⚠️ |
+| Browser UI included | ✅ | ⚠️ (extras) | ✅ | ❌ | ✅ | ✅ |
+| Works with *any* OpenAI-compatible LLM (LM Studio, llama.cpp, cloud) | ✅ | ⚠️ | ✅ | ✅ | ⚠️ | ⚠️ |
+| Built-in OCR for scanned PDFs | ✅ | ❌ | ⚠️ | ⚠️ (opt-in) | ❌ | ✅ |
+| Agentic tool-calling retrieval loop | ✅ | ❌ | ⚠️ | ✅ | ❌ | ⚠️ |
+| Hybrid retrieval (dense + BM25) + cross-encoder rerank | ✅ | ⚠️ | ⚠️ | ✅ | ✅ | ✅ |
+| Fiction/non-fiction awareness | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Multiple named library "sets" | ✅ | ⚠️ | ⚠️ | ✅ | ⚠️ | ⚠️ |
+| MCP server for external clients (LM Studio) | ✅ | ❌ | ⚠️ | ⚠️ | ❌ | ❌ |
+| Offline retrieval eval + CI regression gate | ✅ | ❌ | ❌ | ⚠️ | ❌ | ❌ |
+| Lightweight (small dependency footprint, CPU-first) | ✅ | ⚠️ | ⚠️ | ✅ | ⚠️ | ❌ |
+
+> Legend: ✅ built-in, ⚠️ possible but requires extra work/configuration, ❌ not provided.
+
+### Remarks on this setup
+
+- **Sized for book-scale libraries, not toy demos.** Most RAG frameworks target
+  a handful of documents. This project is built around the reality of indexing
+  tens of thousands of chunks across large ebook/PDF collections — deterministic
+  chunk IDs for safe re-ingest, batched upserts past Chroma's hard limits, and a
+  lazy BM25 index that tolerates ~186k chunks.
+- **Everything is self-contained and portable.** One `./run.sh` pulls in the
+  venv, dependencies, and embedding model, and the whole folder can be copied to
+  another machine. There is no external vector database or framework runtime to
+  stand up — just Python and ChromaDB on disk.
+- **Local-first by default.** Embeddings run on CPU, and the LLM can be your own
+  LM Studio / llama.cpp instance. Your data never has to leave the machine, which
+  matters for a private book collection.
+- **Opinionated retrieval, not a blank toolkit.** You get hybrid dense+BM25
+  fusion, cross-encoder reranking, a low-relevance guard, and a fiction
+  awareness layer wired in and tuned out of the box — no assembly required.
+  Framework-style tools (LlamaIndex/LangChain) leave these decisions to you.
+- **Human-centric workflows for the messy real world.** OCR for scanned PDFs with
+  automatic engine comparison, incremental ingest you can pause/resume/stop, and
+  a folder-picker UI — conveniences aimed at non-developers that generic
+  frameworks don't provide.
+- **Good enough, verifiably.** The offline eval harness plus a CI regression gate
+  (`scripts/eval.py diff`) let you upgrade embedding models or tweak retrieval
+  and prove you didn't make answers worse — something most self-hosted chat apps
+  lack.
+
 ## Notes
 
 - **GPU install is for future use only.** The app currently forces CPU at runtime
