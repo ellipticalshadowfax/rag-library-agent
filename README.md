@@ -102,6 +102,11 @@ All settings live in `config.json`:
 | `ocr_enabled` | `false` | OCR scanned PDFs during ingest |
 | `sets` | — | Named library directories (see below) |
 
+> **Tuning & portability:** the defaults work well out of the box, but several
+> settings are dataset- or hardware-dependent. See [**tuning.md**](tuning.md) for
+> how the RAG parameters behave across different corpora and machines, and how to
+> re-tune them (including the hard-coded context budget).
+
 ### Library sets
 
 You can organize multiple directories under named "sets":

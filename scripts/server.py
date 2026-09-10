@@ -88,6 +88,18 @@ def save_cfg(cfg):
 
 
 def default_cfg():
+    # NOTE: This is only the fallback when config.json is missing; the live
+    # settings live in config.json and are what the Setup tab edits. The RAG
+    # *tuning* keys (grouped below) are the ones that most affect retrieval
+    # quality vs. latency/context size:
+    #   chunk_tokens / chunk_overlap  — indexing granularity; smaller = finer
+    #                                   retrieval, more chunks to embed.
+    #   parent_tokens                 — section size for parent_child generation.
+    #   retrieval_top_k               — chunks surfaced in the prompt (capped 8).
+    #   relevance_threshold           — low-relevance guard score floor.
+    #   max_retrieval_hops            — extra LLM-driven search rounds.
+    #   llm_temperature / llm_max_tokens — generation creativity & length caps.
+    #   rerank_enabled / rerank_model — cross-encoder re-scoring (adds latency).
     return {
         "embed_model": "intfloat/multilingual-e5-small",
         "embed_device": "cpu",

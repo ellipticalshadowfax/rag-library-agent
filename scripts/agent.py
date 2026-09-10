@@ -490,7 +490,19 @@ def build_context(hits: list, max_words: int = 0) -> str:
 
 
 # ─── Hybrid retrieval (BM25 lexical leg + RRF fusion) ────────────────────────
-
+#
+# These are the retrieval tuning knobs that balance precision against cost.
+# They are hard-coded (not in config.json) because they trade CPU/memory against
+# recall, and their sweet spot is largely corpus-size dependent:
+#   BM25_TOP_N   — how many BM25 hits to take as the lexical leg before fusion.
+#                  More = better recall at the cost of a bigger rerank pool.
+#   BM25_BATCH   — rows per Chroma pagination call while (re)building the index.
+#                  Chroma caps the returned chunk count, so large corpora MUST
+#                  be walked in pages; lowering this hurts build speed, not
+#                  quality.
+#   FUSE_RRF_K   — the RRF constant (rank score = sum 1/(k + rank)). Larger k
+#                  flattens the score curve and gives the lexical leg more
+#                  weight relative to the dense pool.
 BM25_TOP_N = 30
 BM25_BATCH = 20000
 FUSE_RRF_K = 60
@@ -641,6 +653,15 @@ def _rrf_fuse(*ranked_lists, k=FUSE_RRF_K):
     return [by_id[cid] for cid in order]
 
 
+# Context-budget tuning: controls how much retrieved text actually reaches the
+# LLM prompt (a key knob for fitting the local model's context window and for
+# latency, since bigger contexts = slower generation).
+#   CONTEXT_WORD_BUDGET — total words allowed across all chunks in one prompt.
+#                         Raise it if the LLM has a large context window and
+#                         needs more evidence; lower it for faster responses.
+#   CHUNK_WORD_CAP     — per-chunk truncation for flat/child chunks. Parent
+#                         sections are already size-capped at ingest
+#                         (parent_tokens), so this only trims children.
 CONTEXT_WORD_BUDGET = 1500
 CHUNK_WORD_CAP = 240
 
@@ -734,6 +755,11 @@ def retrieve_rag(set_name, query, top_k, filter_kind, cfg,
         low_relevance, relevance_reason, title_mode, matched_titles,
         message_context (the raw context string), common_terms.
     """
+    # Retrieval pool sizing. We retrieve a pool 3x larger than the final top_k
+    # (capped at 30) so the reranker has real candidates to reorder, then
+    # diversify down to top_k (or fewer). Raising top_k (config retrieval_top_k)
+    # widens coverage; lowering it tightens the prompt. The pool cap protects
+    # latency since every extra candidate costs a rerank call.
     top_k = min(top_k, 8)
     pool_k = min(top_k * 3, 30)
 
