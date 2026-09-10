@@ -12,7 +12,7 @@
     --ok: #3ddc84; --warn: #f6c453; --err: #f76c6c; --fiction: #ff7ac3;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; min-height: 100vh; }
+  body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; min-height: 100vh; display: flex; flex-direction: column; }
   header { display: flex; align-items: center; gap: 16px; padding: 14px 22px; border-bottom: 1px solid var(--border); background: var(--panel); }
   header h1 { font-size: 17px; font-weight: 600; letter-spacing: .3px; }
   .status-pill { font-size: 12px; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); white-space: nowrap; }
@@ -26,7 +26,8 @@
   nav button { background: transparent; border: 1px solid var(--border); color: var(--muted); padding: 8px 18px; border-radius: 8px; cursor: pointer; font-size: 13px; transition: .15s; }
   nav button:hover { color: var(--text); border-color: var(--accent); }
   nav button.active { background: var(--accent); color: #fff; border-color: var(--accent); }
-  main { padding: 22px; max-width: 1100px; margin: 0 auto; }
+  main { padding: 22px; max-width: 1100px; margin: 0 auto; flex: 1; min-height: 0; width: 100%; display: flex; flex-direction: column; }
+  main:has(#tab-chat.active) { max-width: none; }
   .tab { display: none; }
   .tab.active { display: block; }
   .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 18px; margin-bottom: 18px; }
@@ -66,7 +67,7 @@
   .progress-wrap { height: 8px; background: var(--panel2); border-radius: 999px; overflow: hidden; border: 1px solid var(--border); }
   .progress-bar { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent2)); width: 0%; transition: width .4s; }
   .log-box { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px; font-family: ui-monospace, monospace; font-size: 11.5px; max-height: 260px; overflow: auto; white-space: pre-wrap; color: var(--muted); }
-  .chat-panel { display: flex; flex-direction: column; height: calc(100vh - 130px); min-height: 420px; }
+  .chat-panel { display: flex; flex-direction: column; flex: 1; min-height: 0; }
   .chat-panel > h3, .chat-panel > .grid, #chatBlocked { flex-shrink: 0; }
   .chat-toolbar { display: flex; align-items: center; justify-content: space-between; }
   .chat-toolbar .btn { padding: 5px 12px; font-size: 12px; font-weight: 500; background: var(--panel2); border: 1px solid var(--border); color: var(--muted); border-radius: 8px; }
@@ -89,10 +90,12 @@
   .source .snippet { display: none; margin-top: 8px; color: var(--muted); font-size: 12.5px; line-height: 1.5; }
   .source.open .snippet { display: block; }
   .fiction-banner { background: rgba(255,122,195,.08); border: 1px solid var(--fiction); color: var(--fiction); padding: 10px 14px; border-radius: 8px; font-size: 13px; }
+  .lowrel-banner { background: rgba(246,196,83,.08); border: 1px solid var(--warn); color: var(--warn); padding: 10px 14px; border-radius: 8px; font-size: 13px; }
   #chatBlocked { display: none; margin: 12px 0 0; padding: 10px 14px; border-radius: 8px; font-size: 13px; color: var(--warn); border: 1px solid var(--warn); background: rgba(246,196,83,.06); }
   #chatBlocked.show { display: block; }
-  .chat-layout { display: flex; gap: 16px; align-items: stretch; }
-  .chat-sidebar { width: 250px; flex-shrink: 0; display: flex; flex-direction: column; gap: 8px; }
+  #tab-chat.active { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  .chat-layout { display: flex; gap: 16px; align-items: stretch; flex: 1; min-height: 0; }
+  .chat-sidebar { width: 250px; flex-shrink: 0; display: flex; flex-direction: column; gap: 8px; min-height: 0; }
   .chat-sidebar .btn { width: 100%; }
   #convList { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; overflow-y: auto; flex: 1; }
   .conv-item { display: flex; align-items: center; gap: 6px; padding: 9px 11px; cursor: pointer; border-bottom: 1px solid var(--border); font-size: 13px; color: var(--text); }
@@ -175,7 +178,8 @@
         </div>
         <div>
           <label>Model id</label>
-          <input type="text" id="cfgLlmModel" placeholder="default">
+          <input type="text" id="cfgLlmModel" list="llmModelList" placeholder="default">
+          <datalist id="llmModelList"></datalist>
         </div>
         <div>
           <label>API key (optional, for remote/cloud)</label>
@@ -253,6 +257,18 @@
         <div>
           <label>Retrieval top-k</label>
           <input type="number" id="cfgTopK" min="1" max="50">
+        </div>
+        <div>
+          <label>Retrieval hops <span class="small muted">(LLM multi-hop)</span></label>
+          <input type="number" id="cfgRetrievalHops" min="1" max="6" step="1">
+        </div>
+        <div>
+          <label>Relevance threshold</label>
+          <input type="number" id="cfgRelevanceThreshold" min="0" max="1" step="0.05">
+        </div>
+        <div>
+          <label>Reranker model <span class="small muted">(cross-encoder)</span></label>
+          <input type="text" id="cfgRerankModel" placeholder="cross-encoder/ms-marco-MiniLM-L-6-v2">
         </div>
         <div>
           <label>Ingest batch size</label>
@@ -576,9 +592,19 @@
 
 <script>
 const $ = s => document.querySelector(s);
+async function jsonResponse(r) {
+  const text = await r.text();
+  let data;
+  try { data = JSON.parse(text); }
+  catch (_) {
+    throw new Error(`Server returned HTTP ${r.status} instead of JSON. Check that the app is opened at the RAG server URL.`);
+  }
+  if (!r.ok && !data?.error) throw new Error(`Request failed (HTTP ${r.status}).`);
+  return data;
+}
 const api = {
-  get: (p) => fetch(p).then(r => r.json()),
-  post: (p, body, method = 'POST') => fetch(p, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) }).then(r => r.json()),
+  get: (p) => fetch(p).then(jsonResponse),
+  post: (p, body, method = 'POST') => fetch(p, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) }).then(jsonResponse),
 };
 
 function toast(msg, ms = 3500) {
@@ -625,6 +651,11 @@ async function refreshStatus() {
         sp.className = 'status-pill err';
       }
     }
+    if (llm.models && llm.models.length) {
+      $('#llmModelList').innerHTML = llm.models.map(m =>
+        '<option value="' + String(m).replace(/&/g, '&amp;').replace(/"/g, '&quot;') + '"></option>'
+      ).join('');
+    }
   } catch (e) { $('#llmPill').textContent = 'LLM: ???'; }
 }
 setInterval(refreshStatus, 15000); refreshStatus();
@@ -666,19 +697,29 @@ async function refreshIngest() {
   // Live progress panel
   if (running) {
     $('#ingestLive').classList.remove('hidden');
-    const pct = s.total ? Math.min(100, Math.round(100 * (s.current || 0) / s.total)) : 5;
+    const starting = s.phase === 'starting';
+    const stopping = s.phase === 'stopping';
+    const pct = s.total ? Math.min(100, Math.round(100 * (s.current || 0) / s.total)) : (starting || stopping ? 4 : 5);
     $('#ingestBar').style.width = (s.paused ? Math.max(pct, 5) : pct) + '%';
     $('#iDone').textContent = s.done || 0; $('#iSkip').textContent = s.skipped || 0; $('#iErr').textContent = s.errors || 0;
     const suffix = s.paused ? ' (paused)' : '';
-    $('#ingestLabel').innerHTML = `<span class="spinner"></span>Indexing ${escapeHtml(s.set_name || '…')}${suffix} &mdash; file ${s.current || '…'}/${s.total || '…'}`;
+    if (starting || stopping) {
+      $('#ingestLabel').innerHTML = `<span class="spinner"></span>${escapeHtml(s.message || 'Working…')}`;
+    } else {
+      $('#ingestLabel').innerHTML = `<span class="spinner"></span>Indexing ${escapeHtml(s.set_name || '…')}${suffix} &mdash; file ${s.current || '…'}/${s.total || '…'}`;
+    }
     if (s.lines && s.lines.length) {
       $('#ingestLog').textContent = s.lines.join('');
       $('#ingestLog').scrollTop = $('#ingestLog').scrollHeight;
     }
     ingestWasRunning = true;
     pill.classList.remove('hidden'); pill.classList.add('pulse');
-    pill.textContent = (s.paused ? '⏸ Indexing paused · file ' : 'Indexing · file ')
-      + (s.current || '…') + '/' + (s.total || '…');
+    if (starting || stopping) {
+      pill.textContent = (s.paused ? '⏸ ' : '') + (s.message || 'Working…');
+    } else {
+      pill.textContent = (s.paused ? '⏸ Indexing paused · file ' : 'Indexing · file ')
+        + (s.current || '…') + '/' + (s.total || '…');
+    }
     pill.className = 'status-pill warn actionable pulse';
   } else {
     if (ingestWasRunning) {
@@ -810,6 +851,9 @@ async function loadConfig() {
   $('#cfgChunkTokens').value = c.chunk_tokens || 330;
   $('#cfgChunkOverlap').value = c.chunk_overlap || 60;
   $('#cfgTopK').value = c.retrieval_top_k || 10;
+  $('#cfgRetrievalHops').value = c.max_retrieval_hops ?? 2;
+  $('#cfgRelevanceThreshold').value = c.relevance_threshold ?? 0.80;
+  $('#cfgRerankModel').value = c.rerank_model || 'cross-encoder/ms-marco-MiniLM-L-6-v2';
   $('#cfgBatchSize').value = c.ingest_batch_size || 500;
   $('#cfgOcr').value = String(c.ocr_enabled || false);
   $('#cfgOcrMerge').value = String(c.ocr_merge ?? true);
@@ -834,6 +878,10 @@ $('#btnSaveConfig').onclick = async () => {
     chunk_tokens: parseInt($('#cfgChunkTokens').value) || 330,
     chunk_overlap: parseInt($('#cfgChunkOverlap').value) || 60,
     retrieval_top_k: parseInt($('#cfgTopK').value) || 10,
+    max_retrieval_hops: parseInt($('#cfgRetrievalHops').value) || 1,
+    retrieval_hops_driver: 'llm',
+    relevance_threshold: parseFloat($('#cfgRelevanceThreshold').value),
+    rerank_model: $('#cfgRerankModel').value.trim() || 'cross-encoder/ms-marco-MiniLM-L-6-v2',
     ingest_batch_size: parseInt($('#cfgBatchSize').value) || 500,
     ocr_enabled: $('#cfgOcr').value === 'true',
     ocr_merge: $('#cfgOcrMerge').value === 'true',
@@ -1362,6 +1410,9 @@ function renderConvMessages(conv) {
       if (meta.fiction_only) {
         box.appendChild(el('div', 'fiction-banner', '&#9888; All retrieved sources are fictional works. The answer is drawn from fiction and must not be treated as fact.'));
       }
+      if (meta.low_relevance) {
+        box.appendChild(el('div', 'lowrel-banner', '&#9888; The library has no strong match for this question. ' + escapeHtml(meta.relevance_reason || 'Low relevance') + ' — the answer comes from the model\'s own knowledge. Propose related searches to surface nearby material.'));
+      }
       const sources = meta.sources || [];
       if (sources.length) {
         box.appendChild(el('div', '', `<div class="small muted" style="margin:12px 0 4px">Sources (${sources.length}):</div>`));
@@ -1427,41 +1478,44 @@ async function ask() {
   const set = $('#chatSet').value;
   if (!q) return toast('Type a question.');
   if (!set) return toast('No collection yet — run Ingest first.');
+  const askBtn = $('#btnAsk');
+  if (askBtn.disabled) return;
+  askBtn.disabled = true;
 
-  if (!currentConv) {
-    const created = await api.post('/api/conversations', { title: 'New chat', set });
-    if (created && created.id) currentConv = created.id;
-  }
-
-  const out = $('#chatOut');
-  out.querySelector('.chat-empty')?.remove();
-
-  const turn = el('div', 'chat-turn');
-  turn.appendChild(el('div', 'chat-msg user', `<div class="who">you <span class="when">${chatTime()}</span></div>${escapeHtml(q)}`));
-  $('#chatInput').textContent = '';
-  out.appendChild(turn);
-  scrollChat();
-
-  const thinking = addThinking(turn);
-  const r = await api.post('/api/chat', { query: q, set, filter_kind: $('#chatKind').value, conversation_id: currentConv });
-  thinking.remove();
-  if (r.error) {
-    addAgentMsg(turn, `<span style="color:var(--err)">${escapeHtml(r.error)}</span>`);
-    return;
-  }
-  if (currentConv) {
-    const conv = await api.get('/api/conversations/' + currentConv);
-    if (conv && !conv.error) renderConvMessages(conv);
-    loadConvs();
-  } else {
-    const box = addAgentMsg(turn, escapeHtml(r.answer).replace(/\n/g, '<br>'));
-    if (r.fiction_only) {
-      box.appendChild(el('div', 'fiction-banner', '&#9888; All retrieved sources are fictional works. The answer is drawn from fiction and must not be treated as fact.'));
+  let thinking = null;
+  try {
+    if (!currentConv) {
+      const created = await api.post('/api/conversations', { title: 'New chat', set });
+      if (!created || !created.id) throw new Error(created?.error || 'Could not create a conversation.');
+      currentConv = created.id;
     }
-    if (r.sources && r.sources.length) {
-      box.appendChild(el('div', '', `<div class="small muted" style="margin:12px 0 4px">Sources (${r.sources.length}):</div>`));
-      for (const s of r.sources) box.appendChild(makeSource(s));
+    const out = $('#chatOut');
+    out.querySelector('.chat-empty')?.remove();
+
+    const turn = el('div', 'chat-turn');
+    turn.appendChild(el('div', 'chat-msg user', `<div class="who">you <span class="when">${chatTime()}</span></div>${escapeHtml(q)}`));
+    $('#chatInput').textContent = '';
+    out.appendChild(turn);
+    scrollChat();
+
+    thinking = addThinking(turn);
+    const r = await api.post('/api/chat', { query: q, set, filter_kind: $('#chatKind').value, conversation_id: currentConv });
+    thinking.remove(); thinking = null;
+    if (r.error) {
+      addAgentMsg(turn, `<span style="color:var(--err)">${escapeHtml(r.error)}</span>`);
+      return;
     }
+    if (currentConv) {
+      const conv = await api.get('/api/conversations/' + currentConv);
+      if (conv && !conv.error) renderConvMessages(conv);
+      loadConvs();
+    }
+  } catch (e) {
+    if (thinking) thinking.remove();
+    toast(e.message || 'Chat request failed. Check the server and LLM status.');
+    console.error('Chat request failed:', e);
+  } finally {
+    askBtn.disabled = false;
   }
 }
 loadConvs();

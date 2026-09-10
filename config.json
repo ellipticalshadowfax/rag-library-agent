@@ -5,10 +5,15 @@
   "chunk_tokens": 330,
   "chunk_overlap": 60,
   "llm_base_url": "http://localhost:1234/v1",
-  "llm_model": "gemma-4-e2b-it",
+  "llm_model": "default",
   "llm_temperature": 0.3,
   "llm_max_tokens": 4096,
   "retrieval_top_k": 10,
+  "relevance_threshold": 0.80,
+  "max_retrieval_hops": 2,
+  "retrieval_hops_driver": "llm",
+  "rerank_model": "cross-encoder/ms-marco-MiniLM-L-6-v2",
+  "rerank_enabled": true,
   "ingest_batch_size": 500,
   "exclude": [
     "Leo Tolstoy"

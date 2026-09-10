@@ -32,10 +32,18 @@ repo. Do not introduce them back in.
 - `scripts/chat_store.py` — JSON-file conversation persistence under
   `conversations/` (gitignored). The web UI and the OpenAI-compatible endpoint
   use it to store/manage multiple chats.
+- `scripts/mcp_server.py` — MCP server exposing the library index as callable
+  tools (`search_library`, `summarize_work`, `list_collections`) so chat clients
+  like LM Studio can ground answers in the library. Stdio by default; `--http`
+  for a remote/SSE server. Launched via `run_mcp.sh`. Must never write to stdout
+  (the stdio JSON-RPC channel) — stray prints are diverted to stderr by
+  `_muted_stdout()`; missing collections raise instead of `sys.exit`. Embedder +
+  Chroma are cached per-process (loads on CPU).
 - `web/index.html` — single-file SPA frontend (Setup/Scan/Ingest/Chat tabs,
   folder-picker dialog, global ingest-activity pill).
 - `config.json` — app config (embed model, LLM URL/model, chunking, sets).
 - `run.sh` — one-command launcher (venv + deps + model predownload + server).
+- `run_mcp.sh` — launcher for the MCP server (stdio by default, `--http` for remote).
 - `requirements.txt`, `README.md`.
 
 ## How it runs
@@ -68,6 +76,27 @@ repo. Do not introduce them back in.
   place, so `--force`/re-ingest is safe.
 - **Fiction awareness**: documents are tagged `fiction`/`nonfiction` from Calibre
   tags; chat adds a warning banner if all retrieved sources are fiction.
+- **Hybrid retrieval + rerank**: `server.py` fuses the dense pool (embedding,
+  incl. LLM multi-hop) with a BM25 lexical leg via Reciprocal Rank Fusion
+  (k=60), then re-scores the fused candidates with a lazy-loaded cross-encoder
+  reranker (`rerank_model`, default `cross-encoder/ms-marco-MiniLM-L-6-v2`;
+  disable via `rerank_enabled: false`). The BM25 index is built lazily per set
+  by paginating `collection.get(limit=20000, offset=…)` (~186k chunks) and
+  cached in-process with a `df` token->doc-frequency map.
+- **Two tokenizers in `agent.py`**: `stem_tokens()` (English snowballstemmer)
+  is used ONLY for the low-relevance guard's term-presence check (small text,
+  fast). `tokenize()` (raw lowercase, no stemming) feeds the BM25 index build —
+  stemming 185k+ chunks takes ~12 min, so the index must never use stems.
+- **Low-relevance guard**: runs on the full candidate pool BEFORE diversification
+  (so trimming the context can't drop a decisive term). A missing distinctive
+  (non-generic) query term is decisive unless it's a common corpus word
+  (`df/corpus ≥ 0.01`) — a single common word like "collect" (dressage jargon vs
+  horse books) is tolerated as a synonym-paraphrase, while a rare term like
+  "spherification" or a missing proper-noun phrase always flags low relevance.
+- **Source display**: the `sources` list dedupes by `(title, source)`, so a
+  single multi-chunk book collapses to ONE source entry (e.g. "summarize the
+  MindStar book" shows 1 source) even though the context holds up to
+  `max_per_title=8` chunks of it — that's intended, not a retrieval failure.
 
 ## Conventions / requirements
 - **NO machine-specific paths or PII.** Use placeholders (`/path/to/your/library`),
