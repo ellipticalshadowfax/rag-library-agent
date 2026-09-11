@@ -1380,7 +1380,7 @@ def api_openai_models():
     model_id = cfg.get("llm_model", "default")
     return jsonify({
         "object": "list",
-        "data": [{"id": model_id, "object": "model", "owned_by": "rag-web-chat"}],
+        "data": [{"id": model_id, "object": "model", "owned_by": "rag-library-agent"}],
     })
 
 
