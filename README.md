@@ -7,6 +7,10 @@ UI. Everything runs on your machine — no cloud, no data leaves your disk.
 Books tagged as Fiction/Short Stories in Calibre are treated as fiction: the assistant
 will answer questions about their content but won't present it as factual.
 
+> **New here?** Want the full picture of how the embedding model, semantic search,
+> multi-hop retrieval, OCR, and the local LLM all fit together? Read
+> [**details.md**](details.md) — a step-by-step walkthrough of the entire RAG chain.
+
 ## How it works
 
 Your library files (PDF, EPUB, MOBI) get chunked into small passages and converted
@@ -34,8 +38,8 @@ or any MCP-compatible chat client, instead of the web UI.
 OpenAI-compatible endpoint — local LM Studio, llama.cpp, or a cloud provider).
 
 ```bash
-git clone <repo-url> rag-web-chat
-cd rag-web-chat
+git clone <repo-url> rag-library-agent
+cd rag-library-agent
 chmod +x run.sh
 ./run.sh
 ```
