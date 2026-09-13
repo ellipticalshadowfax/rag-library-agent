@@ -18,6 +18,7 @@ Report: ocr_compare_report.json + rich table.
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -70,7 +71,12 @@ def needs_ocr(pdf_path: str, threshold: int = 50) -> bool:
 def _setup_tesseract(bin_path: str | None, tessdata: str | None):
     if pytesseract is None:
         return False
-    bin_path = bin_path or os.environ.get("TESSERACT_BIN") or DEFAULT_TESS_BIN
+    bin_path = (
+        bin_path
+        or os.environ.get("TESSERACT_BIN")
+        or shutil.which("tesseract")
+        or DEFAULT_TESS_BIN
+    )
     if not os.path.exists(bin_path):
         return False
     pytesseract.pytesseract.tesseract_cmd = bin_path

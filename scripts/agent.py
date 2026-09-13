@@ -18,7 +18,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich import box
 
-from _paths import rag_root
+from _paths import merge_local_config, rag_root
 
 console = Console()
 
@@ -39,7 +39,8 @@ RULES:
 def load_config():
     cfg_path = rag_root() / "config.json"
     with open(cfg_path) as f:
-        return json.load(f)
+        cfg = json.load(f)
+    return merge_local_config(cfg)
 
 
 def setup_client(cfg: dict) -> OpenAI:

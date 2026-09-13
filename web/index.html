@@ -84,6 +84,7 @@
   .tag.nonfiction { color: var(--ok); border-color: var(--ok); }
   .tag.ocr { color: var(--warn); border-color: var(--warn); }
   .muted { color: var(--muted); }
+  .ocr-failed { color: var(--err); }
   .small { font-size: 12px; }
   .progress-wrap { height: 8px; background: var(--panel2); border-radius: 999px; overflow: hidden; border: 1px solid var(--border); }
   .progress-bar { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent2)); width: 0%; transition: width .4s; }
@@ -865,12 +866,12 @@ async function refreshOcr() {
   pauseBtn.classList.toggle('hidden', !running);
   stopBtn.classList.toggle('hidden', !running);
   pauseBtn.textContent = s.paused ? 'Resume' : 'Pause';
+  $('#oDone').textContent = s.done || 0; $('#oSkip').textContent = s.skipped || 0; $('#oErr').textContent = s.errors || 0;
 
   if (running) {
     $('#ocrLive').classList.remove('hidden');
     const pct = s.total ? Math.min(100, Math.round(100 * (s.current || 0) / s.total)) : 5;
     $('#ocrBar').style.width = (s.paused ? Math.max(pct, 5) : pct) + '%';
-    $('#oDone').textContent = s.done || 0; $('#oSkip').textContent = s.skipped || 0; $('#oErr').textContent = s.errors || 0;
     const suffix = s.paused ? ' (paused)' : '';
     $('#ocrLabel').innerHTML = `<span class="spinner"></span>OCR ${escapeHtml(s.mode || '…')}${suffix} &mdash; file ${s.current || '…'}/${s.total || '…'}`;
     if (s.lines && s.lines.length) {
@@ -878,8 +879,18 @@ async function refreshOcr() {
       $('#ocrLog').scrollTop = $('#ocrLog').scrollHeight;
     }
   } else if (s.finished) {
+    // Job ended (or the subprocess crashed / a stale lock was cleaned). Reset
+    // the controls and report success-or-error so the page never looks stuck.
     $('#ocrLive').classList.remove('hidden');
-    $('#ocrLabel').textContent = '✓ OCR finished';
+    $('#ocrBar').style.width = '100%';
+    const failed = s.completed === false || (s.errors || 0) > 0;
+    $('#ocrLabel').textContent = failed
+      ? `✖ OCR stopped (${s.errors || 0} errors) — check the log`
+      : '✓ OCR finished';
+    $('#ocrLabel').classList.toggle('ocr-failed', failed);
+    if (s.lines && s.lines.length) {
+      $('#ocrLog').textContent = s.lines.join('');
+    }
   }
 }
 setInterval(refreshOcr, 2500);
@@ -956,7 +967,7 @@ async function loadConfig() {
   $('#cfgEmbedDevice').value = c.embed_device || 'cpu';
   $('#cfgLlmUrl').value = c.llm_base_url || '';
   $('#cfgLlmModel').value = c.llm_model || '';
-  $('#cfgLlmApiKey').value = c.llm_api_key || '';
+  $('#cfgLlmApiKey').value = c.llm_api_key_set ? '••••••••' : '';
   $('#cfgLlmTemp').value = c.llm_temperature ?? 0.3;
   $('#cfgLlmMaxTokens').value = c.llm_max_tokens || 2048;
   $('#cfgChunkTokens').value = c.chunk_tokens || 330;

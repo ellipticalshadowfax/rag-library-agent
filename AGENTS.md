@@ -27,13 +27,18 @@ repo. Do not introduce them back in.
 - `scripts/ocr.py` — CLI OCR tool (separate from ingest): OCRs scanned PDFs and
   either merges the text layer back into the original (`--mode merge`) or writes
   sidecar `.txt` files (`--mode sidecar`). Writes `.ocr.lock`, logs to `ocr.log`.
-  Driven by the web UI's OCR tab via `/api/ocr*`.
+  Driven by the web UI's OCR tab via `/api/ocr*`. `server.py` reaps the OCR
+  subprocess via `proc.poll()` (a finished-but-unreaped zombie would otherwise
+  make `os.kill(pid,0)` succeed and keep the UI "running" forever) and treats a
+  `.ocr.lock` whose recorded PID is dead as stale: cleaned so a new job can start.
 - `scripts/ocr_compare.py` — compares Tesseract vs RapidOCR on a page sample of
   every scanned PDF, picks the better engine per file, then OCRs the full file.
   Writes `ocr_compare_report.json`. The OCR engine is chosen by the `ocr_backend`
   config (`tesseract` default, `rapidocr` optional). Tesseract binary discovery:
-  `TESSERACT_BIN` env var > `DEFAULT_TESS_BIN` in code (which is a
-  machine-specific fallback — override with the env var on new machines).
+  `$TESSERACT_BIN` > `shutil.which("tesseract")` (PATH) > `DEFAULT_TESS_BIN` in
+  code (a machine-specific fallback — override with the env var on new machines).
+  Ingest's OCR path calls `OCR._setup_tesseract()`, so the same resolution
+  applies to OCR run from the web UI and the CLI.
 - `scripts/merge_ocr_into_pdf.py` — post-OCR utility: adds an invisible
   (searchable) text layer to scanned PDFs from the cached `ocr/<stem>.txt` files.
   Writes in place; only runs when the OCR cache exists and page count matches.

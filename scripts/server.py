@@ -23,7 +23,7 @@ os.environ["CUDA_VISIBLE_DEVICES"] = ""  # Force CPU for embeddings
 from flask import Flask, jsonify, request, send_from_directory, Response
 from flask_cors import CORS
 
-from _paths import rag_root
+from _paths import SECRET_KEYS, rag_root
 
 RAG_ROOT = rag_root()
 SCRIPTS_DIR = RAG_ROOT / "scripts"
@@ -57,6 +57,10 @@ INGEST_STATE = {
     "started_at": None,
 }
 
+# Live Popen for ingest launched from this server (same rationale as _OCR_PROC:
+# poll() reaps the child so a zombie can't keep "running" welded to true).
+_INGEST_PROC = None
+
 
 # ─── Shared OCR progress state ───────────────────────────────────────────────
 OCR_STATE = {
@@ -76,6 +80,11 @@ OCR_STATE = {
     "started_at": None,
 }
 
+# The live Popen for OCR launched from this server. Kept OUT of OCR_STATE so it
+# can't be sent to the client; poll() is what reaps a finished child (a zombie
+# would otherwise keep "running" true forever because os.kill(zombie, 0) works).
+_OCR_PROC = None
+
 
 # ─── Config helpers ──────────────────────────────────────────────────────────
 
@@ -84,9 +93,49 @@ def load_cfg():
 
 
 def save_cfg(cfg):
-    p = RAG_ROOT / "config.json"
-    with open(p, "w") as f:
-        json.dump(cfg, f, indent=2)
+    # Secrets (e.g. llm_api_key) must never be written to the git-tracked
+    # config.json; they go to the gitignored config.local.json instead.
+    public = {k: v for k, v in cfg.items() if k not in SECRET_KEYS}
+    secrets = {k: v for k, v in cfg.items() if k in SECRET_KEYS}
+    _write_json(RAG_ROOT / "config.json", public)
+    if secrets:
+        _save_local_overrides(secrets)
+
+
+def _write_json(path, data):
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def _save_local_overrides(updates: dict):
+    """Merge ``updates`` into config.local.json, dropping keys set to None."""
+    local_path = RAG_ROOT / "config.local.json"
+    overrides = {}
+    if local_path.exists():
+        try:
+            with open(local_path) as f:
+                overrides = json.load(f) or {}
+        except Exception:
+            overrides = {}
+    for k, v in updates.items():
+        if v is None or v == "":
+            overrides.pop(k, None)
+        else:
+            overrides[k] = v
+    _write_json(local_path, overrides)
+
+
+# Client-facing placeholder for a set API key. The real key is never returned.
+API_KEY_MASK = "••••••••"
+
+
+def _public_cfg(cfg: dict) -> dict:
+    """Return a copy of cfg safe to send to the client (secret masked)."""
+    out = dict(cfg)
+    has_key = bool(out.get("llm_api_key"))
+    out["llm_api_key"] = API_KEY_MASK if has_key else None
+    out["llm_api_key_set"] = has_key
+    return out
 
 
 def default_cfg():
@@ -243,20 +292,27 @@ def read_ingest_status():
                                     if stopping else
                                     "Starting \u2014 loading embedding model / scanning directory\u2026")
 
-    # Authoritative live PID: prefer a live lock file, else our tracked PID.
+    # Authoritative live PID: prefer the tracked Popen via poll() (reaps the
+    # child and detects exit even with a zombie), else a live lock file, else
+    # our tracked PID.
+    global _INGEST_PROC
     ext = ING.read_ingest_lock()
     tracked = INGEST_STATE.get("pid")
-
+    returncode = None
     live_pid = None
-    if ext:
-        live_pid = int(ext.get("pid"))
-        INGEST_STATE.update(set_name=ext.get("set"), target=ext.get("target"))
-    elif tracked:
-        try:
-            os.kill(tracked, 0)
-            live_pid = tracked
-        except OSError:
-            pass
+    if _INGEST_PROC is not None:
+        returncode = _INGEST_PROC.poll()
+        if returncode is None:
+            live_pid = _INGEST_PROC.pid
+    elif ext:
+        p = int(ext.get("pid"))
+        if _pid_alive(p):
+            live_pid = p
+            INGEST_STATE.update(set_name=ext.get("set"), target=ext.get("target"))
+        elif _INGEST_PROC is None:
+            _clean_stale_lock(RAG_ROOT / ".ingest.lock", ext)
+    elif tracked and _pid_alive(tracked):
+        live_pid = tracked
 
     if live_pid:
         # A job is running. Detect a newly-started run and clear stale flags.
@@ -274,7 +330,7 @@ def read_ingest_status():
         INGEST_STATE["message"] = ""
         if was_running and not INGEST_STATE["finished"]:
             INGEST_STATE["finished"] = True
-            INGEST_STATE["completed"] = True
+            INGEST_STATE["completed"] = (returncode == 0) if returncode is not None else True
             INGEST_STATE["phase"] = "done"
         elif not INGEST_STATE["finished"]:
             INGEST_STATE["phase"] = "idle"
@@ -285,25 +341,21 @@ def read_ingest_status():
 
 def live_ingest_pid():
     """PID of a live ingest (spawned here or externally), else None."""
+    if _INGEST_PROC is not None and _INGEST_PROC.poll() is None:
+        return _INGEST_PROC.pid
     pid = INGEST_STATE.get("pid")
-    if pid:
-        try:
-            os.kill(pid, 0)
-            return pid
-        except OSError:
-            pass
+    if pid and _pid_alive(pid):
+        return pid
     ext = ING.read_ingest_lock()
     if ext:
         p = int(ext.get("pid"))
-        try:
-            os.kill(p, 0)
+        if _pid_alive(p):
             return p
-        except OSError:
-            pass
     return None
 
 
 def start_ingest(target, set_name, force=False, only=None):
+    global _INGEST_PROC
     if ingest_active():
         return False, "An ingest is already running (started here or externally)."
     cfg = load_cfg()
@@ -332,6 +384,7 @@ def start_ingest(target, set_name, force=False, only=None):
     log_path = RAG_ROOT / "ingest.log"
     with open(log_path, "w") as logf:
         proc = subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT, env=env)
+    _INGEST_PROC = proc
     INGEST_STATE["pid"] = proc.pid
     return True, f"Ingest started (PID {proc.pid})."
 
@@ -374,8 +427,41 @@ def _read_ocr_lock():
         return None
 
 
+def _pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _clean_stale_lock(lock_path, ext=None):
+    """Remove a job lock whose recorded process is gone (crash/segfault/kill
+    that prevented the child's `finally` from releasing it). A lingering lock
+    would otherwise block new jobs and keep the UI wedged in "running"."""
+    lock = lock_path or (RAG_ROOT / ".ocr.lock")
+    try:
+        if ext:
+            pid = int(ext.get("pid"))
+            if _pid_alive(pid):
+                return  # genuinely live — leave it alone
+        lock.unlink()
+    except Exception:
+        pass
+
+
 def ocr_active():
-    return OCR_STATE["running"] or bool(_read_ocr_lock())
+    if OCR_STATE["running"] or OCR_STATE.get("pid"):
+        return True
+    if _OCR_PROC is not None and _OCR_PROC.poll() is None:
+        return True
+    ext = _read_ocr_lock()
+    if not ext:
+        return False
+    if not _pid_alive(int(ext.get("pid"))):
+        _clean_stale_lock(RAG_ROOT / ".ocr.lock", ext)
+        return False
+    return True
 
 
 def read_ocr_status():
@@ -384,6 +470,10 @@ def read_ocr_status():
     if log_path.exists():
         with open(log_path, "r", encoding="utf-8", errors="replace") as f:
             lines = f.readlines()[-400:]
+
+    # Always keep the live log bytes in state — a freshly-truncated log with no
+    # progress line yet must not leave a previous run's lines on screen.
+    OCR_STATE["lines"] = lines[-80:]
 
     last = ""
     for ln in lines:
@@ -399,26 +489,36 @@ def read_ocr_status():
                 if part.startswith("skip="): skipped = int(part.split("=")[1].rstrip(","))
                 if part.startswith("err="): errors = int(part.split("=")[1].rstrip(","))
             OCR_STATE.update(current=cur, total=total, done=done,
-                             skipped=skipped, errors=errors, lines=lines[-80:])
+                             skipped=skipped, errors=errors)
         except Exception:
             pass
 
+    # Authoritative liveness: prefer the tracked Popen via poll() (which reaps
+    # the child, so a finished-but-unreaped zombie exits cleanly), then a live
+    # lock file, then our tracked PID.
+    global _OCR_PROC
     ext = _read_ocr_lock()
     tracked = OCR_STATE.get("pid")
+    returncode = None
     live_pid = None
-    if ext:
-        live_pid = int(ext.get("pid"))
-        OCR_STATE.update(target=ext.get("target"), mode=ext.get("mode"))
-    elif tracked:
-        try:
-            os.kill(tracked, 0)
-            live_pid = tracked
-        except OSError:
-            pass
+    if _OCR_PROC is not None:
+        returncode = _OCR_PROC.poll()
+        if returncode is None:
+            live_pid = _OCR_PROC.pid
+    elif ext:
+        p = int(ext.get("pid"))
+        if _pid_alive(p):
+            live_pid = p
+        elif _OCR_PROC is None:
+            _clean_stale_lock(RAG_ROOT / ".ocr.lock", ext)
+    elif tracked and _pid_alive(tracked) and (ext is None):
+        live_pid = tracked
 
     if live_pid:
         if OCR_STATE.get("pid") != live_pid:
             OCR_STATE.update(pid=live_pid, finished=False, completed=False, paused=False)
+        if ext:
+            OCR_STATE.update(target=ext.get("target"), mode=ext.get("mode"))
         OCR_STATE["running"] = True
     else:
         was_running = OCR_STATE["running"] or OCR_STATE.get("pid") is not None
@@ -427,30 +527,30 @@ def read_ocr_status():
         OCR_STATE["pid"] = None
         if was_running and not OCR_STATE["finished"]:
             OCR_STATE["finished"] = True
-            OCR_STATE["completed"] = True
+            # Clean exit -> completed; crash/kill (non-zero/negative rc or a
+            # leftover stale lock) -> failed so the UI can show the error state.
+            OCR_STATE["completed"] = (returncode == 0) if returncode is not None else True
+        if _OCR_PROC is not None and returncode is not None:
+            _OCR_PROC = None
     return OCR_STATE
 
 
 def live_ocr_pid():
+    if _OCR_PROC is not None and _OCR_PROC.poll() is None:
+        return _OCR_PROC.pid
     pid = OCR_STATE.get("pid")
-    if pid:
-        try:
-            os.kill(pid, 0)
-            return pid
-        except OSError:
-            pass
+    if pid and _pid_alive(pid):
+        return pid
     ext = _read_ocr_lock()
     if ext:
         p = int(ext.get("pid"))
-        try:
-            os.kill(p, 0)
+        if _pid_alive(p):
             return p
-        except OSError:
-            pass
     return None
 
 
 def start_ocr(target, mode="merge", force=False, only=None, languages=None, backend=None):
+    global _OCR_PROC
     if ocr_active():
         return False, "An OCR job is already running."
     if not target:
@@ -473,6 +573,7 @@ def start_ocr(target, mode="merge", force=False, only=None, languages=None, back
     log_path = RAG_ROOT / "ocr.log"
     with open(log_path, "w") as logf:
         proc = subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT, env=env)
+    _OCR_PROC = proc
     OCR_STATE["pid"] = proc.pid
     return True, f"OCR started (PID {proc.pid}, mode={mode})."
 
@@ -542,7 +643,7 @@ def static_files(filename):
 
 @app.route("/api/config", methods=["GET"])
 def api_config_get():
-    return jsonify(load_cfg())
+    return jsonify(_public_cfg(load_cfg()))
 
 
 @app.route("/api/config", methods=["POST"])
@@ -567,7 +668,7 @@ def api_config_set():
     if "sets" in data:
         cfg["sets"] = data["sets"]
     save_cfg(cfg)
-    return jsonify({"ok": True, "config": cfg})
+    return jsonify({"ok": True, "config": _public_cfg(cfg)})
 
 
 @app.route("/api/system")
@@ -783,12 +884,15 @@ def api_llm_apply():
     if "llm_model" in data and data["llm_model"] is not None:
         cfg["llm_model"] = str(data["llm_model"]).strip() or "default"
     if "llm_api_key" in data:
-        cfg["llm_api_key"] = (str(data["llm_api_key"]).strip()
-                              or None)
+        key = str(data["llm_api_key"]).strip()
+        if key and key != API_KEY_MASK:
+            cfg["llm_api_key"] = key
+        elif not key:
+            cfg["llm_api_key"] = None
     save_cfg(cfg)
     global _chat_client
     _chat_client = None
-    return jsonify({"ok": True, "config": cfg})
+    return jsonify({"ok": True, "config": _public_cfg(cfg)})
 
 
 @app.route("/api/llm/selfhost")
@@ -933,7 +1037,11 @@ def api_setup_finish():
     if "llm_model" in data and data["llm_model"]:
         cfg["llm_model"] = str(data["llm_model"]).strip()
     if "llm_api_key" in data:
-        cfg["llm_api_key"] = str(data["llm_api_key"]).strip() or None
+        key = str(data["llm_api_key"]).strip()
+        if key and key != API_KEY_MASK:
+            cfg["llm_api_key"] = key
+        elif not key:
+            cfg["llm_api_key"] = None
     if "embed_model" in data:
         cfg["embed_model"] = str(data["embed_model"]).strip()
     if "embed_device" in data:
@@ -950,7 +1058,7 @@ def api_setup_finish():
     global _chat_client, _chat_embedder
     _chat_client = None
     _chat_embedder = None
-    return jsonify({"ok": True, "config": cfg})
+    return jsonify({"ok": True, "config": _public_cfg(cfg)})
 
 
 @app.route("/api/scan", methods=["POST"])
