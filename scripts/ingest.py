@@ -25,7 +25,7 @@ console = Console()
 
 from agent import tokenize
 
-from _paths import rag_root
+from _paths import merge_local_config, rag_root
 
 EXTENSIONS_TEXT = {".pdf", ".epub", ".mobi", ".djvu", ".txt", ".html", ".htm"}
 
@@ -90,7 +90,8 @@ def release_ingest_lock():
 def load_config():
     cfg_path = rag_root() / "config.json"
     with open(cfg_path) as f:
-        return json.load(f)
+        cfg = json.load(f)
+    return merge_local_config(cfg)
 
 # ─── Manifest DB ─────────────────────────────────────────────────────────────
 

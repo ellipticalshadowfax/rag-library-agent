@@ -98,6 +98,7 @@ Pygments==2.21.0
 pymupdf==1.28.2
 PyPika==0.51.1
 pyproject_hooks==1.2.0
+pytesseract==0.3.13
 python-dateutil==2.9.0.post0
 python-dotenv==1.2.3
 PyYAML==6.0.3

@@ -132,7 +132,7 @@ better engine, then OCRs each file.
 | `RAG_DEVICE` / `RAG_GPU` | `run.sh` | `cpu` | `cpu` or `gpu` dependency/install mode |
 | `INGEST_BATCH_SIZE` | `ingest.py` | `500` | Embed/upsert batch per call (Chroma hard limit ~5461). Lower for low-RAM machines. |
 | `INGEST_MAX_CHUNKS` | `ingest.py` | `5000` | Chunk count that flags a file "big" for batched processing |
-| `TESSERACT_BIN` | `ocr_compare.py` / `ocr.py` | code default | Path to the tesseract binary (the code default is machine-specific — set this on new machines) |
+| `TESSERACT_BIN` | `ocr_compare.py` / `ocr.py` | PATH (`shutil.which`) | Explicit path to the tesseract binary. Resolved in order: `TESSERACT_BIN` env > PATH (`shutil.which`) > in-code default (machine-specific — set this env var on new machines to override) |
 | `OCR_SAMPLE_DIR` | `ocr_compare.py` | `/tmp/opencode/ocr_samples` | Where page samples are cached |
 
 `CUDA_VISIBLE_DEVICES=""` is forced in the Python scripts to pin embeddings to
