@@ -1703,6 +1703,14 @@ def _chroma_client():
     return chromadb.PersistentClient(path=str(RAG_ROOT / "index"))
 
 
+def _has_table(conn, name):
+    import sqlite3
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+    ).fetchone()
+    return row is not None
+
+
 def _rename_manifest_set(old: str, new: str):
     """Point every manifest row for `old` at `new` so a later re-ingest
     doesn't double-count already-indexed files."""
@@ -1711,7 +1719,23 @@ def _rename_manifest_set(old: str, new: str):
         return
     import sqlite3
     conn = sqlite3.connect(str(db))
+    # Re-pointing old rows onto `new` can collide (rel_path, set_name) PK with
+    # rows `new` already owns; prefer the old set's rows and drop the dupes.
+    conn.execute(
+        "DELETE FROM files WHERE set_name = ? AND rel_path IN "
+        "(SELECT rel_path FROM files WHERE set_name = ?)", (new, old))
     conn.execute("UPDATE files SET set_name = ? WHERE set_name = ?", (new, old))
+    if _has_table(conn, "parents"):
+        conn.execute(
+            "DELETE FROM parents WHERE set_name = ? AND parent_id IN "
+            "(SELECT parent_id FROM parents WHERE set_name = ?)", (new, old))
+        conn.execute("UPDATE parents SET set_name = ? WHERE set_name = ?", (new, old))
+    for tbl in ("bm25_tokens", "bm25_df"):
+        if _has_table(conn, tbl):
+            conn.execute(
+                f"UPDATE {tbl} SET set_name = ? WHERE set_name = ?", (new, old))
+    if _has_table(conn, "meta"):
+        conn.execute("UPDATE meta SET key = ? WHERE key = ?", (f"target:{new}", f"target:{old}"))
     conn.commit()
     conn.close()
 
@@ -1723,6 +1747,13 @@ def _drop_manifest_set(set_name: str):
     import sqlite3
     conn = sqlite3.connect(str(db))
     conn.execute("DELETE FROM files WHERE set_name = ?", (set_name,))
+    if _has_table(conn, "parents"):
+        conn.execute("DELETE FROM parents WHERE set_name = ?", (set_name,))
+    for tbl in ("bm25_tokens", "bm25_df"):
+        if _has_table(conn, tbl):
+            conn.execute(f"DELETE FROM {tbl} WHERE set_name = ?", (set_name,))
+    if _has_table(conn, "meta"):
+        conn.execute("DELETE FROM meta WHERE key = ?", (f"target:{set_name}",))
     conn.commit()
     conn.close()
 

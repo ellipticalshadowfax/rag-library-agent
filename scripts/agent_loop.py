@@ -122,7 +122,11 @@ def _render_hits(hits: list) -> str:
         elif score is not None:
             score = round(float(score), 3)
         score_str = f" (score {score:.3f})" if score is not None else ""
-        lines.append(f"## Source {i+1} {kind_label}{score_str} — {source}{page_str}")
+        # Surface the chapter/section heading so the model can cite the exact
+        # part of the book instead of only the whole work (keeps it on-topic).
+        section = meta.get("section_title") or ""
+        section_str = f" — {section.strip()}" if section and section.strip() else ""
+        lines.append(f"## Source {i+1} {kind_label}{score_str} — {source}{section_str}{page_str}")
         lines.append(h["document"])
         lines.append("")
     return "\n".join(lines)

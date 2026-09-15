@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-09-10T16:05:43.725103+00:00",
+  "generated_at": "2026-09-15T00:02:07.770304+00:00",
   "top_k": 10,
   "num_queries": 22,
   "sets": [
@@ -9,10 +9,10 @@
   "metrics": {
     "hit@5": 1.0,
     "hit@10": 1.0,
-    "mrr@5": 0.9545,
-    "mrr@10": 0.9545,
+    "mrr@5": 1.0,
+    "mrr@10": 1.0,
     "context_recall": 1.0,
-    "context_precision": 0.6568
+    "context_precision": 0.8864
   },
   "queries": [
     {
@@ -26,15 +26,15 @@
         "hit@10": 1.0,
         "mrr@10": 1.0,
         "context_recall": 1.0,
-        "context_precision": 0.5
+        "context_precision": 1.0
       },
       "retrieval": {
-        "num_hits": 4,
+        "num_hits": 3,
         "title_mode": false,
         "matched_titles": [],
         "fiction_only": true,
-        "low_relevance": true,
-        "relevance_reason": "query terms not found in retrieved sources: Summarize, baggin, dwarve"
+        "low_relevance": false,
+        "relevance_reason": ""
       }
     },
     {
@@ -70,13 +70,15 @@
         "hit@10": 1.0,
         "mrr@10": 1.0,
         "context_recall": 1.0,
-        "context_precision": 0.25
+        "context_precision": 1.0
       },
       "retrieval": {
-        "num_hits": 5,
-        "title_mode": false,
-        "matched_titles": [],
-        "fiction_only": false,
+        "num_hits": 1,
+        "title_mode": true,
+        "matched_titles": [
+          "Flatland : a romance of many dimensions"
+        ],
+        "fiction_only": true,
         "low_relevance": false,
         "relevance_reason": ""
       }
@@ -92,13 +94,15 @@
         "hit@10": 1.0,
         "mrr@10": 1.0,
         "context_recall": 1.0,
-        "context_precision": 0.5
+        "context_precision": 1.0
       },
       "retrieval": {
-        "num_hits": 4,
-        "title_mode": false,
-        "matched_titles": [],
-        "fiction_only": false,
+        "num_hits": 3,
+        "title_mode": true,
+        "matched_titles": [
+          "The Call of Cthulhu"
+        ],
+        "fiction_only": true,
         "low_relevance": false,
         "relevance_reason": ""
       }
@@ -114,13 +118,13 @@
         "hit@10": 1.0,
         "mrr@10": 1.0,
         "context_recall": 1.0,
-        "context_precision": 0.5
+        "context_precision": 1.0
       },
       "retrieval": {
-        "num_hits": 4,
+        "num_hits": 3,
         "title_mode": false,
         "matched_titles": [],
-        "fiction_only": false,
+        "fiction_only": true,
         "low_relevance": false,
         "relevance_reason": ""
       }
@@ -132,19 +136,21 @@
       "filter_kind": null,
       "metrics": {
         "hit@5": 1.0,
-        "mrr@5": 0.5,
+        "mrr@5": 1.0,
         "hit@10": 1.0,
-        "mrr@10": 0.5,
+        "mrr@10": 1.0,
         "context_recall": 1.0,
-        "context_precision": 0.5
+        "context_precision": 1.0
       },
       "retrieval": {
-        "num_hits": 4,
-        "title_mode": false,
-        "matched_titles": [],
+        "num_hits": 3,
+        "title_mode": true,
+        "matched_titles": [
+          "Ender's Game"
+        ],
         "fiction_only": true,
-        "low_relevance": true,
-        "relevance_reason": "query terms not found in retrieved sources: doe"
+        "low_relevance": false,
+        "relevance_reason": ""
       }
     },
     {
@@ -161,7 +167,7 @@
         "context_precision": 0.5
       },
       "retrieval": {
-        "num_hits": 4,
+        "num_hits": 3,
         "title_mode": true,
         "matched_titles": [
           "The Future of the Human Mind: A Study of the Potential Powers of the Brain (George Estabrooks, Nancy E. Gross) (Z-Library)",
@@ -181,19 +187,24 @@
       "filter_kind": null,
       "metrics": {
         "hit@5": 1.0,
-        "mrr@5": 0.5,
+        "mrr@5": 1.0,
         "hit@10": 1.0,
-        "mrr@10": 0.5,
+        "mrr@10": 1.0,
         "context_recall": 1.0,
         "context_precision": 0.5
       },
       "retrieval": {
-        "num_hits": 4,
-        "title_mode": false,
-        "matched_titles": [],
+        "num_hits": 3,
+        "title_mode": true,
+        "matched_titles": [
+          "His Last Bow: An Epilogue of Sherlock Holmes",
+          "The Adventures of Sherlock Holmes",
+          "The Memoirs of Sherlock Holmes",
+          "The Return of Sherlock Holmes"
+        ],
         "fiction_only": true,
-        "low_relevance": true,
-        "relevance_reason": "query terms not found in retrieved sources: mysterie, doe, holme"
+        "low_relevance": false,
+        "relevance_reason": ""
       }
     },
     {
@@ -214,8 +225,8 @@
         "title_mode": false,
         "matched_titles": [],
         "fiction_only": true,
-        "low_relevance": true,
-        "relevance_reason": "query terms not found in retrieved sources: opulent, partie"
+        "low_relevance": false,
+        "relevance_reason": ""
       }
     },
     {
@@ -229,15 +240,15 @@
         "hit@10": 1.0,
         "mrr@10": 1.0,
         "context_recall": 1.0,
-        "context_precision": 0.5
+        "context_precision": 1.0
       },
       "retrieval": {
-        "num_hits": 4,
+        "num_hits": 3,
         "title_mode": false,
         "matched_titles": [],
         "fiction_only": true,
-        "low_relevance": true,
-        "relevance_reason": "query terms not found in retrieved sources: doe, nautilu"
+        "low_relevance": false,
+        "relevance_reason": ""
       }
     },
     {
@@ -254,7 +265,7 @@
         "context_precision": 1.0
       },
       "retrieval": {
-        "num_hits": 4,
+        "num_hits": 3,
         "title_mode": true,
         "matched_titles": [
           "Black Beauty"
@@ -278,7 +289,7 @@
         "context_precision": 1.0
       },
       "retrieval": {
-        "num_hits": 4,
+        "num_hits": 3,
         "title_mode": true,
         "matched_titles": [
           "Winnie-the-Pooh"
@@ -299,15 +310,17 @@
         "hit@10": 1.0,
         "mrr@10": 1.0,
         "context_recall": 1.0,
-        "context_precision": 0.5
+        "context_precision": 1.0
       },
       "retrieval": {
-        "num_hits": 4,
-        "title_mode": false,
-        "matched_titles": [],
+        "num_hits": 3,
+        "title_mode": true,
+        "matched_titles": [
+          "Gulliver's Travels into Several Remote Nations of the World"
+        ],
         "fiction_only": true,
-        "low_relevance": true,
-        "relevance_reason": "query terms not found in retrieved sources: doe"
+        "low_relevance": false,
+        "relevance_reason": ""
       }
     },
     {
@@ -321,15 +334,15 @@
         "hit@10": 1.0,
         "mrr@10": 1.0,
         "context_recall": 1.0,
-        "context_precision": 0.5
+        "context_precision": 1.0
       },
       "retrieval": {
-        "num_hits": 4,
+        "num_hits": 3,
         "title_mode": false,
         "matched_titles": [],
-        "fiction_only": false,
-        "low_relevance": true,
-        "relevance_reason": "query terms not found in retrieved sources: doe"
+        "fiction_only": true,
+        "low_relevance": false,
+        "relevance_reason": ""
       }
     },
     {
@@ -346,7 +359,7 @@
         "context_precision": 1.0
       },
       "retrieval": {
-        "num_hits": 4,
+        "num_hits": 3,
         "title_mode": true,
         "matched_titles": [
           "Paradise Lost"
@@ -367,10 +380,10 @@
         "hit@10": 1.0,
         "mrr@10": 1.0,
         "context_recall": 1.0,
-        "context_precision": 0.2
+        "context_precision": 0.5
       },
       "retrieval": {
-        "num_hits": 5,
+        "num_hits": 3,
         "title_mode": false,
         "matched_titles": [],
         "fiction_only": false,
@@ -392,12 +405,12 @@
         "context_precision": 0.5
       },
       "retrieval": {
-        "num_hits": 4,
+        "num_hits": 3,
         "title_mode": false,
         "matched_titles": [],
         "fiction_only": false,
-        "low_relevance": true,
-        "relevance_reason": "query terms not found in retrieved sources: Describe"
+        "low_relevance": false,
+        "relevance_reason": ""
       }
     },
     {
@@ -414,12 +427,14 @@
         "context_precision": 1.0
       },
       "retrieval": {
-        "num_hits": 4,
+        "num_hits": 3,
         "title_mode": false,
-        "matched_titles": [],
+        "matched_titles": [
+          "Sun Tzu on the Art of War"
+        ],
         "fiction_only": false,
-        "low_relevance": true,
-        "relevance_reason": "query terms not found in retrieved sources: doe"
+        "low_relevance": false,
+        "relevance_reason": ""
       }
     },
     {
@@ -440,8 +455,8 @@
         "title_mode": false,
         "matched_titles": [],
         "fiction_only": false,
-        "low_relevance": true,
-        "relevance_reason": "query terms not found in retrieved sources: inducing, hypnosi"
+        "low_relevance": false,
+        "relevance_reason": ""
       }
     },
     {
@@ -458,7 +473,7 @@
         "context_precision": 0.5
       },
       "retrieval": {
-        "num_hits": 4,
+        "num_hits": 3,
         "title_mode": false,
         "matched_titles": [],
         "fiction_only": false,
@@ -477,15 +492,15 @@
         "hit@10": 1.0,
         "mrr@10": 1.0,
         "context_recall": 1.0,
-        "context_precision": 0.5
+        "context_precision": 1.0
       },
       "retrieval": {
-        "num_hits": 4,
+        "num_hits": 3,
         "title_mode": false,
         "matched_titles": [],
         "fiction_only": false,
-        "low_relevance": true,
-        "relevance_reason": "query terms not found in retrieved sources: brainwash"
+        "low_relevance": false,
+        "relevance_reason": ""
       }
     },
     {

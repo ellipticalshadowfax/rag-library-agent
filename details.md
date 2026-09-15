@@ -276,8 +276,9 @@ so one book can't monopolize the context. In parent–child mode, multiple child
 from the same section are **collapsed to one parent** — the best child "wins" and
 its parent text is used for generation.
 
-The final context is trimmed to a **word budget** (`CONTEXT_WORD_BUDGET: 1500`
-words, each chunk capped at 240 words) so it fits in the LLM's context window.
+The final context is trimmed to a **word budget** (`context_word_budget: 1000`
+words, each chunk capped at `chunk_word_cap: 200`) so it fits in the LLM's
+context window.
 The `sources` list you see in the UI is deduped by `(title, source)`, so a single
 book appears as **one** source even if several of its chunks are in the context.
 
@@ -394,7 +395,7 @@ separate server, because it's directly relevant to RAG:
   window and rich reasoning without being prohibitively slow on local hardware.
 
 The practical upshot for this app: the **context window** of your chosen local model
-dictates how big the retrieved context can be (`CONTEXT_WORD_BUDGET`). A small model
+dictates how big the retrieved context can be (`context_word_budget`). A small model
 with a tight window (e.g. 1.7B / 8k tokens) needs a smaller budget; a large 32k+
 model can handle more evidence.
 
