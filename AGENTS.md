@@ -111,11 +111,14 @@ repo. Do not introduce them back in.
   fast). `tokenize()` (raw lowercase, no stemming) feeds the BM25 index build —
   stemming 185k+ chunks takes ~12 min, so the index must never use stems.
 - **Low-relevance guard**: runs on the full candidate pool BEFORE diversification
-  (so trimming the context can't drop a decisive term). A missing distinctive
-  (non-generic) query term is decisive unless it's a common corpus word
-  (`df/corpus ≥ 0.01`) — a single common word like "collect" (dressage jargon vs
-  horse books) is tolerated as a synonym-paraphrase, while a rare term like
-  "spherification" or a missing proper-noun phrase always flags low relevance.
+  (so trimming the context can't drop a decisive term). Only a **proper-noun**
+  signal is decisive: a missing capitalized phrase ("Bilbo Baggins", "Captain
+  Ahab") or a missing proper-noun single word (e.g. "Gulliver", "Cthulhu") that
+  is NOT a common corpus word (`df/corpus ≥ 0.01`). Ordinary descriptive words
+  ("dystopian", "opulent", "cultist") are deliberately only a soft signal and
+  never fire alone — authors paraphrase such vocabulary even when retrieval is
+  correct, and treating them as decisive produced false "no match" notes that
+  drove the model to re-search endlessly and drift off track.
 - **Source display**: the `sources` list dedupes by `(title, source)`, so a
   single multi-chunk book collapses to ONE source entry (e.g. "summarize the
   MindStar book" shows 1 source) even though the context holds up to

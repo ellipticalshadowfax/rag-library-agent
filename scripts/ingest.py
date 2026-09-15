@@ -105,7 +105,7 @@ class Manifest:
         self.conn.executescript("""
             CREATE TABLE IF NOT EXISTS files (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                rel_path TEXT NOT NULL UNIQUE,
+                rel_path TEXT NOT NULL,
                 abs_path TEXT NOT NULL,
                 mtime REAL NOT NULL,
                 size INTEGER NOT NULL,
@@ -114,7 +114,8 @@ class Manifest:
                 tags TEXT DEFAULT '[]',
                 title TEXT DEFAULT '',
                 set_name TEXT DEFAULT '',
-                indexed_at REAL
+                indexed_at REAL,
+                UNIQUE(rel_path, set_name)
             );
             CREATE INDEX IF NOT EXISTS idx_files_path ON files(rel_path);
 
@@ -134,21 +135,115 @@ class Manifest:
             );
 
             CREATE TABLE IF NOT EXISTS parents (
-                parent_id TEXT PRIMARY KEY,
+                parent_id TEXT NOT NULL,
                 set_name TEXT NOT NULL DEFAULT '',
                 source TEXT NOT NULL DEFAULT '',
                 title TEXT NOT NULL DEFAULT '',
                 section_title TEXT NOT NULL DEFAULT '',
                 section_ordinal INTEGER NOT NULL DEFAULT 0,
-                text TEXT NOT NULL DEFAULT ''
+                text TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (parent_id, set_name)
             );
             CREATE INDEX IF NOT EXISTS idx_parents_source ON parents(source);
+
+            CREATE TABLE IF NOT EXISTS meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL DEFAULT ''
+            );
         """)
+        self._migrate_legacy_schemas()
         self.conn.commit()
 
-    def is_current(self, rel_path: str, mtime: float, size: int) -> bool:
+    def _migrate_legacy_schemas(self):
+        """Rebuild tables that predate set-scoped keys.
+
+        The legacy `files` table had UNIQUE(rel_path) across ALL sets and
+        `parents` had PRIMARY KEY (parent_id), so two sets indexing the same
+        rel path / parent id silently overwrote each other. Rebuild both with
+        set_name included in the key. Data is copied with INSERT OR IGNORE
+        (legacy rows were unique by rel_path / parent_id, so nothing is lost).
+
+        Legacy detection reads the stored CREATE TABLE text because SQLite's
+        autoindexes (from UNIQUE/PRIMARY KEY constraints) report empty column
+        lists to PRAGMA index_info on this platform.
+        """
+        def table_sql(table):
+            row = self.conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone()
+            return (row[0] if row else "") or ""
+
+        def normalized(table):
+            return " ".join(table_sql(table).lower().split())
+
+        files_sql = normalized("files")
+        if re.search(r"rel_path\s+text\s+not\s+null\s+unique", files_sql) or (
+                re.search(r"\bunique\s*\(\s*rel_path\s*\)", files_sql)
+                and "unique (rel_path, set_name)" not in files_sql):
+            self.conn.execute("ALTER TABLE files RENAME TO files_legacy")
+            self.conn.execute("""
+                CREATE TABLE files (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    rel_path TEXT NOT NULL,
+                    abs_path TEXT NOT NULL,
+                    mtime REAL NOT NULL,
+                    size INTEGER NOT NULL,
+                    ocr_status TEXT DEFAULT 'none',
+                    kind TEXT DEFAULT 'unknown',
+                    tags TEXT DEFAULT '[]',
+                    title TEXT DEFAULT '',
+                    set_name TEXT DEFAULT '',
+                    indexed_at REAL,
+                    UNIQUE(rel_path, set_name)
+                )
+            """)
+            self.conn.execute("""
+                INSERT OR IGNORE INTO files
+                    (rel_path, abs_path, mtime, size, ocr_status, kind,
+                     tags, title, set_name, indexed_at)
+                SELECT rel_path, abs_path, mtime, size, ocr_status, kind,
+                       tags, title, set_name, indexed_at
+                FROM files_legacy
+            """)
+            self.conn.execute("DROP TABLE files_legacy")
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_files_path ON files(rel_path)")
+
+        parents_sql = normalized("parents")
+        if re.search(r"parent_id\s+text\s+primary\s+key", parents_sql) or (
+                re.search(r"primary\s+key\s*\(\s*parent_id\s*\)", parents_sql)
+                and "primary key (parent_id, set_name)" not in parents_sql):
+            self.conn.execute("ALTER TABLE parents RENAME TO parents_legacy")
+            self.conn.execute("""
+                CREATE TABLE parents (
+                    parent_id TEXT NOT NULL,
+                    set_name TEXT NOT NULL DEFAULT '',
+                    source TEXT NOT NULL DEFAULT '',
+                    title TEXT NOT NULL DEFAULT '',
+                    section_title TEXT NOT NULL DEFAULT '',
+                    section_ordinal INTEGER NOT NULL DEFAULT 0,
+                    text TEXT NOT NULL DEFAULT '',
+                    PRIMARY KEY (parent_id, set_name)
+                )
+            """)
+            self.conn.execute("""
+                INSERT OR IGNORE INTO parents
+                    (parent_id, set_name, source, title, section_title,
+                     section_ordinal, text)
+                SELECT parent_id, set_name, source, title, section_title,
+                       section_ordinal, text
+                FROM parents_legacy
+            """)
+            self.conn.execute("DROP TABLE parents_legacy")
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_parents_source ON parents(source)")
+
+    def is_current(self, rel_path: str, mtime: float, size: int,
+                   set_name: str = "") -> bool:
         row = self.conn.execute(
-            "SELECT mtime, size FROM files WHERE rel_path = ?", (rel_path,)
+            "SELECT mtime, size FROM files WHERE rel_path = ? AND set_name = ?",
+            (rel_path, set_name),
         ).fetchone()
         return row and row["mtime"] == mtime and row["size"] == size
 
@@ -158,7 +253,7 @@ class Manifest:
         self.conn.execute("""
             INSERT INTO files (rel_path, abs_path, mtime, size, ocr_status, kind, tags, title, set_name, indexed_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(rel_path) DO UPDATE SET
+            ON CONFLICT(rel_path, set_name) DO UPDATE SET
                 abs_path=excluded.abs_path,
                 mtime=excluded.mtime,
                 size=excluded.size,
@@ -171,13 +266,39 @@ class Manifest:
         """, (rel_path, abs_path, mtime, size, ocr_status, kind, tags_json, title, set_name, time.time()))
         self.conn.commit()
 
-    def remove(self, rel_path: str):
-        self.conn.execute("DELETE FROM files WHERE rel_path = ?", (rel_path,))
+    def remove(self, rel_path: str, set_name: str = ""):
+        self.conn.execute(
+            "DELETE FROM files WHERE rel_path = ? AND set_name = ?",
+            (rel_path, set_name),
+        )
         self.conn.commit()
 
-    def get_indexed_paths(self) -> set[str]:
-        rows = self.conn.execute("SELECT rel_path FROM files").fetchall()
+    def get_indexed_paths(self, set_name: str = "") -> set[str]:
+        rows = self.conn.execute(
+            "SELECT rel_path FROM files WHERE set_name = ?", (set_name,)
+        ).fetchall()
         return {r["rel_path"] for r in rows}
+
+    def get_set_files(self, set_name: str) -> dict[str, tuple]:
+        rows = self.conn.execute(
+            "SELECT rel_path, abs_path, mtime, size FROM files WHERE set_name = ?",
+            (set_name,),
+        ).fetchall()
+        return {r["rel_path"]: (r["abs_path"], r["mtime"], r["size"]) for r in rows}
+
+    def get_meta(self, key: str):
+        row = self.conn.execute(
+            "SELECT value FROM meta WHERE key = ?", (key,)
+        ).fetchone()
+        return row["value"] if row else None
+
+    def set_meta(self, key: str, value: str):
+        self.conn.execute(
+            "INSERT INTO meta (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value),
+        )
+        self.conn.commit()
 
     def remove_bm25_tokens(self, doc_id: str, set_name: str = ""):
         self.conn.execute(
@@ -922,6 +1043,18 @@ def ingest(target: str, set_name: str, cfg: dict, force: bool = False, only_path
     # Load manifest
     manifest = Manifest(rag_root_ / "manifest.db")
 
+    # Record the directory this set was ingested from so a later ingest can
+    # detect a re-pointed/moved target and warn instead of silently re-indexing.
+    target_key = f"target:{set_name}"
+    prev_target = manifest.get_meta(target_key)
+    if prev_target and str(target_path) != prev_target:
+        console.print(
+            f"[yellow]Warning: '{set_name}' was previously ingested from "
+            f"'{prev_target}'; now ingesting '{target_path}'. Files that no "
+            f"longer exist at their old path will be pruned; unchanged relative "
+            f"paths are still skipped.[/yellow]")
+    manifest.set_meta(target_key, str(target_path))
+
     # Load ChromaDB
     client = chromadb.PersistentClient(path=str(index_dir))
     collection = client.get_or_create_collection(
@@ -941,6 +1074,7 @@ def ingest(target: str, set_name: str, cfg: dict, force: bool = False, only_path
 
     # Collect files
     files_to_process = []
+    seen = set()
     for root, dirs, files in os.walk(target_path):
         dirs[:] = [d for d in dirs if not d.startswith(".")]
         for fname in files:
@@ -955,11 +1089,13 @@ def ingest(target: str, set_name: str, cfg: dict, force: bool = False, only_path
             if exclude and any(x in rel for x in exclude):
                 continue
 
+            seen.add(rel)
+
             stat = fpath.stat()
             mtime = stat.st_mtime
             size = stat.st_size
 
-            if not force and manifest.is_current(rel, mtime, size):
+            if not force and manifest.is_current(rel, mtime, size, set_name):
                 continue
 
             # Get metadata
@@ -996,6 +1132,30 @@ def ingest(target: str, set_name: str, cfg: dict, force: bool = False, only_path
                 "kind": kind,
                 "ocr_status": ocr_status,
             })
+
+    # Prune this set's stale entries: manifest rows + Chroma chunks for files
+    # that are no longer under the target. A row is stale only when its rel
+    # path was NOT seen in this walk AND its recorded abs path no longer
+    # exists. A pure mount-point change keeps identical rel paths (so `seen`
+    # still matches and nothing is pruned); a genuine deletion, rename, or a
+    # re-pointed target that changed the relative tree is cleaned here instead
+    # of leaving orphaned chunks in the collection.
+    if not only_path:
+        stale = []
+        for rel, (abs_path, _m, _s) in manifest.get_set_files(set_name).items():
+            if rel not in seen and not Path(abs_path).exists():
+                stale.append(rel)
+        for rel in stale:
+            try:
+                collection.delete(where={"source": rel})
+            except Exception as e:
+                print(f"WARN prune-stale failed for {rel}: {e}", flush=True)
+            manifest.remove(rel, set_name)
+            manifest.remove_parents(rel, set_name)
+        if stale:
+            console.print(
+                f"[dim]Pruned {len(stale)} removed/moved file(s) from "
+                f"'{set_name}' and its collection.[/dim]")
 
     if not files_to_process:
         console.print("[green]No new or changed files to process.[/green]")
@@ -1035,9 +1195,23 @@ def ingest(target: str, set_name: str, cfg: dict, force: bool = False, only_path
                     finfo["ocr_status"] = "cached"
                 # Auto write-back: merge the OCR text into the original PDF so it
                 # becomes searchable/extractable without an OCR re-run next time.
+                # Only merge while the cache is newer than the PDF (i.e. the text
+                # layer isn't already applied), then refresh the recorded stat so
+                # the merged file is seen as current next run instead of being
+                # reprocessed (the in-place save changes its mtime/size).
                 if ocr_merge:
-                    merged = merge_text_into_pdf(str(fpath), str(ocr_out))
-                    print(f"[{idx}/{total}] {'merged' if merged else 'merge-failed'} OCR into {fpath.name}", flush=True)
+                    try:
+                        cache_newer = ocr_out.stat().st_mtime >= fpath.stat().st_mtime
+                    except OSError:
+                        cache_newer = False
+                    if cache_newer:
+                        merged = merge_text_into_pdf(str(fpath), str(ocr_out))
+                        if merged:
+                            st = fpath.stat()
+                            finfo["mtime"], finfo["size"] = st.st_mtime, st.st_size
+                        print(f"[{idx}/{total}] {'merged' if merged else 'merge-failed'} OCR into {fpath.name}", flush=True)
+                    else:
+                        print(f"[{idx}/{total}] skip merge (OCR text already embedded) {fpath.name}", flush=True)
 
             # Extract text
             text, text_meta = extract_text(fpath, ext, ocr_cache)

@@ -28,16 +28,16 @@ instead of guessing.
   omnibus-heavy libraries may want more.
 - `relevance_threshold` — score distributions vary by embedding model and
   corpus, so the "right" floor differs per setup.
-- `CONTEXT_WORD_BUDGET` — see below; the biggest portability concern.
+- `context_word_budget` — see below; the biggest portability concern.
 
 ## The main portability caveat: context budget
 
-`CONTEXT_WORD_BUDGET` (`1500` words) and `CHUNK_WORD_CAP` (`240`) are **hard-coded**
-in `scripts/agent.py`, not in `config.json`. They assume a decently sized local
-context window:
+`context_word_budget` (`1000` words) and `chunk_word_cap` (`200`) live in
+`config.json` (fallback constants in `scripts/agent.py` for older configs).
+They were tuned assuming a smallish local model with a tight context window:
 
-- On a small model with a tight window (e.g. 1.5B-param / 8k tokens), 1500 words
-  of context + history + system prompt can crowd out the answer. Lower it.
+- On a small model with a tight window (e.g. 1.5B-param / 8k tokens), 1000 words
+  of context + history + system prompt can still crowd out the answer. Lower it.
 - On a large model with 32k+ context, you're leaving evidence-gathering capacity
   unused. Raise it.
 
@@ -57,8 +57,8 @@ but the benefit disappears.
 |-----------|-------------------|
 | Short / technical / reference content | `chunk_tokens` 200–250 |
 | Long-form fiction | `chunk_tokens` 400+ |
-| Tight LLM context window | Lower `CONTEXT_WORD_BUDGET` |
-| Large context window (32k+) | Raise `CONTEXT_WORD_BUDGET` |
+| Tight LLM context window | Lower `context_word_budget` |
+| Large context window (32k+) | Raise `context_word_budget` |
 | CPU-only / slow hardware | Disable `rerank_enabled` |
 | Different embedding model | Re-derive `relevance_threshold` via eval |
 
@@ -145,8 +145,8 @@ for unusual setups:
 
 | Constant | File | Value | What it controls |
 |----------|------|-------|------------------|
-| `CONTEXT_WORD_BUDGET` | `agent.py` | `1500` | Total words allowed in the prompt. **The main one to tune** — match your LLM's context window. |
-| `CHUNK_WORD_CAP` | `agent.py` | `240` | Per-child-chunk truncation in the prompt. |
+| `context_word_budget` | `config.json` | `1000` | Total words allowed in the prompt. **The main one to tune** — match your LLM's context window. |
+| `chunk_word_cap` | `config.json` | `200` | Per-child-chunk truncation in the prompt. |
 | `BM25_TOP_N` | `agent.py` | `30` | BM25 hits taken for the lexical leg before fusion. |
 | `BM25_BATCH` | `agent.py` | `20000` | Chunks per paginated build of the lexical index. |
 | `FUSE_RRF_K` | `agent.py` | `60` | RRF constant; larger flattens scores and weights the lexical leg more. |
