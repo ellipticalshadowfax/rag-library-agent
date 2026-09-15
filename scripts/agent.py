@@ -234,6 +234,36 @@ def _match_titles(query: str, set_name: str, limit: int = 4) -> list[str]:
     q = re.sub(r"[^a-z0-9 ]", " ", query.lower()).strip()
     qwords = {w for w in q.split() if w not in _QUERY_STOP}
     work_directed = _is_work_directed(query, q)
+    # Distinctive proper nouns from the query ("Gulliver", "Metamorphosis",
+    # "Bilbo Baggins") reliably identify a specific work even when the query is
+    # a factual question ("Which nations does Gulliver visit?") that does not
+    # literally restate the title. Multi-word phrases ("black beauty") must be
+    # present as a WHOLE in the title to route (so "Black" nothing else can't
+    # hijack "The Black Swan"), and only when all non-stop phrase words appear.
+    try:
+        proper = [p.lower() for p in extract_terms(query).get("proper", [])]
+    except Exception:
+        proper = []
+    multi_phrases = [p for p in proper if " " in p]
+    single_proper = {p for p in proper if " " not in p}
+
+    # A standalone proper word that appears in a large share of the set's
+    # titles (e.g. "NLP" in ~15% of an NLP collection) is a broad topic
+    # keyword, NOT a work name — routing on it alone scatters to the wrong
+    # books. Only words distinctive to a small share of titles are reliable
+    # single-word identifiers ("Gulliver", "Ender", "Cthulhu").
+    if single_proper:
+        normalized_rows = []
+        for (title,) in rows:
+            tt = re.sub(r"[^a-z0-9 ]", " ", title.lower()).strip()
+            if len(tt) >= 3:
+                normalized_rows.append(tt)
+        n_titles = max(len(normalized_rows), 1)
+        single_proper = {
+            w for w in single_proper
+            if sum(1 for tt in normalized_rows if w in tt.split()) / n_titles < 0.03
+        }
+
     scored = []
     for (title,) in rows:
         t = re.sub(r"[^a-z0-9 ]", " ", title.lower()).strip()
@@ -242,6 +272,19 @@ def _match_titles(query: str, set_name: str, limit: int = 4) -> list[str]:
         twords = {w for w in t.split() if w not in _QUERY_STOP}
         if t in q or q in t:
             score = 100 + len(t)
+        # A proper-noun phrase from the query contained wholly in this title
+        # names the work — route even for non-"work-directed" factual questions.
+        elif multi_phrases and any(p.split() and set(p.split()).issubset(twords)
+                                   for p in multi_phrases):
+            phrase_tokens = next(p.split() for p in multi_phrases
+                                 if set(p.split()).issubset(twords))
+            score = 60 + len(t) + 10 * len(phrase_tokens)
+        # A standalone proper-noun word (not part of a multi-word phrase, e.g.
+        # "Gulliver", "Ender", "Cthulhu") names the work. Modest score so an
+        # exact/whole-phrase title match above always wins.
+        elif single_proper and (single_proper & twords):
+            shared = single_proper & twords
+            score = 40 + len(t) + 5 * len(shared)
         elif not work_directed:
             continue
         elif len(twords) >= 2 and len(twords & qwords) >= 2:
@@ -255,48 +298,87 @@ def _match_titles(query: str, set_name: str, limit: int = 4) -> list[str]:
     return [t for _, t in scored[:limit]]
 
 
-def extract_terms(query: str) -> list[str]:
-    """Extract distinctive terms from a query for the low-relevance guard.
+# Words that may appear capitalized as the first token of a question/imperative
+# ("What", "Describe", "Why", ...) but are NOT proper nouns. Used to keep the
+# low-relevance guard from treating a sentence-initial generic word (or a
+# capitalized determiner like "The Hobbit's") as a decisive, must-appear term.
+_PROPER_EXCLUDE = (_TERM_STOP | {
+    "describe", "explain", "summarize", "summary", "synopsis", "recap",
+    "overview", "compare", "review", "why", "what", "which", "who", "whom",
+    "whose", "when", "where", "how", "do", "does", "did", "can", "could",
+    "should", "would", "may", "might", "is", "are", "was", "were", "have",
+    "has", "had", "tell", "give", "list", "name", "find", "show", "write",
+    "question", "about", "book", "books", "novel", "novels", "series",
+})
 
-    Returns (a) capitalized multi-word phrases (proper nouns) and (b) individual
-    stopword-filtered words with apostrophe-s normalized (e.g. "anderson's" ->
-    "anderson"), so lowercase names are still caught. If any term never appears
-    in a retrieved chunk, retrieval is probably off-target.
+
+def _norm_word(tok: str) -> str:
+    """Lowercase a raw token, normalizing ONLY a true possessive apostrophe-s
+    ("anderson's" -> "anderson"), leaving plural/plain words intact
+    ("nautilus" stays "nautilus", "nations" stays "nations"). The forced plural
+    stripping in the old code turned "does"->"doe" and "nautilus"->"nautilu",
+    which never matched the stemmed corpus and caused false "no match" notes.
+    """
+    return re.sub(r"'s$", "", tok.lower())
+
+
+def extract_terms(query: str) -> dict:
+    """Extract the distinctive terms of a query for the low-relevance guard.
+
+    Returns a dict with:
+      "proper": proper-noun candidates (capitalized, non-generic) — names of
+                people, places, entities or works that, when missing from the
+                retrieved sources, are a decisive off-target signal. Entries
+                may be single words or multi-word phrases ("Bilbo Baggins",
+                "Captain Ahab", "Nautilus").
+      "words":  all remaining distinctive lowercase words (descriptive terms
+                like "dystopian" / "opulent" / "cultist"). These are only a
+                SOFT signal and are never decisive on their own, because an
+                author often paraphrases such vocabulary even when retrieval is
+                correctly on-target.
+    Only a true apostrophe-s is normalized, so plurals/proper stems survive.
     """
     raw = re.findall(r"[A-Za-z][A-Za-z\-']*", query)
+    out = {"proper": [], "words": []}
     if not raw:
-        return []
+        return out
 
-    terms = []
-
-    # (a) capitalized phrases — runs of words starting with a capital letter
-    caps, cur = [], []
+    # (a) multi-word proper-noun phrases — runs of consecutive proper-noun
+    #     candidate words (capitalized, not a generic starter/stopword).
+    phrases, cur = [], []
     for t in raw:
-        if t[0].isupper():
-            cur.append(t)
+        base = _norm_word(t)
+        if t[0].isupper() and base not in _PROPER_EXCLUDE and len(base) >= 2:
+            cur.append(base)
         elif cur:
-            caps.append(" ".join(cur))
+            phrases.append(" ".join(cur))
             cur = []
     if cur:
-        caps.append(" ".join(cur))
-    for p in caps:
-        words = [w for w in re.split(r"[^A-Za-z]+", p) if w.lower() not in _TERM_STOP]
-        if words:
-            terms.append(" ".join(words))
+        phrases.append(" ".join(cur))
 
-    # (b) individual distinctive words (handles lowercase names like "clinton")
+    for p in phrases:
+        if p not in out["proper"]:
+            out["proper"].append(p)
+
+    # (b) single proper-noun words that aren't part of a multi-word phrase and
+    #     aren't a generic/stopword.
     for t in raw:
-        w = t.lower().rstrip("'s")
-        if len(w) >= 2 and w not in _TERM_STOP:
-            terms.append(w)
+        base = _norm_word(t)
+        if (t[0].isupper() and len(base) >= 3
+                and base not in _PROPER_EXCLUDE
+                and base not in _GENERIC_WORDS
+                and not any(base in ph.split() for ph in phrases)):
+            if base not in out["proper"]:
+                out["proper"].append(base)
 
-    # dedupe, keep phrases first
-    seen, out = set(), []
-    for t in terms:
-        key = t.lower()
-        if key not in seen:
-            seen.add(key)
-            out.append(t)
+    # (c) remaining distinctive lowercase words (soft signal only).
+    for t in raw:
+        w = _norm_word(t)
+        if (len(w) >= 3 and w not in _TERM_STOP
+                and w not in _GENERIC_WORDS
+                and w not in out["proper"]):
+            if w not in out["words"]:
+                out["words"].append(w)
     return out
 
 
@@ -316,15 +398,22 @@ def detect_low_relevance(query: str, hits: list, cfg: dict | None = None,
     morphology-aware (stemmed):
 
     1. No hits at all.
-    2. A proper-noun phrase from the query is missing (stemmed) from every
+    2. A proper-noun phrase from the query (a capitalized name like "Bilbo
+       Baggins", "Captain Ahab", "Nautilus") is missing (stemmed) from every
        retrieved chunk's text/title/source/tags — decisive off-target signal.
-    3. A missing distinctive (non-generic) query term that is NOT a common
-       corpus word is decisive — regardless of embedding score, so a high dense
-       score on a semantically-near-but-wrong book (e.g. the NLP-cluster
-       failure) cannot mask it. ``common_terms`` is the set of high-doc-
-       frequency corpus tokens; a missing common word is tolerated because it
-       may be a synonym-paraphrase (e.g. "collect" dressage jargon vs horse
-       books that use "training"/"shoulder-in").
+    3. A missing proper-noun single word that is NOT a common corpus word is
+       decisive — regardless of embedding score, so a high dense score on a
+       semantically-near-but-wrong book (e.g. the NLP-cluster failure) cannot
+       mask it. ``common_terms`` is the set of high-doc-frequency corpus
+       tokens; a missing common word is tolerated because it may be a
+       synonym-paraphrase (e.g. "collect" dressage jargon vs horse books that
+       use "training"/"shoulder-in").
+
+       Ordinary descriptive words ("dystopian", "opulent", "cultist", "burned")
+       are deliberately NOT decisive on their own: an author regularly
+       paraphrases such vocabulary even when retrieval is correctly on-target,
+       and treating them as decisive produced false "no match" notes that drove
+       the model to re-search endlessly and drift off track.
     4. Score floor: top hit below ``relevance_threshold`` (default 0.80).
     When hits carry no embedding distance (BM25-only results) the term-presence
     check alone decides.
@@ -346,24 +435,28 @@ def detect_low_relevance(query: str, hits: list, cfg: dict | None = None,
     corpus_stems = set(stem_tokens(" ".join(texts)))
 
     terms = extract_terms(query)
-    for p in [t for t in terms if " " in t]:
+    proper = terms["proper"]
+
+    # Proper-noun phrases — decisive if a real proper phrase is absent.
+    for p in [t for t in proper if " " in t]:
         pstems = set(stem_tokens(p))
         if pstems and not pstems.issubset(corpus_stems):
             return True, "proper terms not found in retrieved sources: " + p
 
-    missing = [t for t in terms
-               if " " not in t and len(t) >= 3
-               and t not in _GENERIC_WORDS
-               and not (set(stem_tokens(t)) & corpus_stems)]
-    decisive = [t for t in missing
-                if not (common_terms and t in common_terms)]
+    # Proper-noun single words — decisive only if absent AND not a common
+    # corpus word (a rare, concrete name reliably indicates off-target).
+    decisive = [t for t in proper
+                if " " not in t and len(t) >= 3
+                and t.lower() not in _GENERIC_WORDS
+                and not (set(stem_tokens(t)) & corpus_stems)
+                and not (common_terms and t.lower() in common_terms)]
 
     top_score = (1 - hits[0]["distance"]) if hits[0].get("distance") is not None else None
     if top_score is not None and top_score < thresh:
         return True, f"top hit score {top_score:.3f} below threshold {thresh}"
 
     if decisive:
-        return True, ("query terms not found in retrieved sources: "
+        return True, ("proper terms not found in retrieved sources: "
                       + ", ".join(decisive[:3]))
     return False, ""
 
@@ -522,7 +615,7 @@ def _get_bm25_index(set_name, collection, backend="auto"):
     if backend != "bm25_chroma":
         try:
             import sqlite3 as _sqlite3
-            db_path = Path(__file__).resolve().parent.parent / "manifest.db"
+            db_path = rag_root() / "manifest.db"
             if db_path.exists():
                 conn = _sqlite3.connect(str(db_path))
                 tbls = {r[0] for r in conn.execute(
@@ -664,8 +757,12 @@ def _rrf_fuse(*ranked_lists, k=FUSE_RRF_K):
 #   CHUNK_WORD_CAP     — per-chunk truncation for flat/child chunks. Parent
 #                         sections are already size-capped at ingest
 #                         (parent_tokens), so this only trims children.
-CONTEXT_WORD_BUDGET = 1500
-CHUNK_WORD_CAP = 240
+# Both are configurable via config.json (`context_word_budget`,
+# `chunk_word_cap`) and default to values that keep a small-model (~2B / 8k
+# context) prompt from overflowing — the largest single cause of truncated,
+# drifting answers on tight-window models.
+CONTEXT_WORD_BUDGET = 1000
+CHUNK_WORD_CAP = 200
 
 
 # ─── Parent-child retrieval (chunking_strategy: parent_child) ────────────────
@@ -685,7 +782,7 @@ def _load_parent_texts(parent_ids, set_name=None):
     ids = [p for p in dict.fromkeys(parent_ids or []) if p]
     if not ids:
         return {}
-    db = Path(__file__).resolve().parent.parent / "manifest.db"
+    db = rag_root() / "manifest.db"
     if not db.exists():
         return {}
     out = {}
@@ -764,6 +861,11 @@ def retrieve_rag(set_name, query, top_k, filter_kind, cfg,
     # latency since every extra candidate costs a rerank call.
     top_k = min(top_k, 8)
     pool_k = min(top_k * 3, 30)
+
+    # Context budget is configurable (`context_word_budget`, `chunk_word_cap`)
+    # and defaults to values that keep a small / tight-window model on-track.
+    budget = int(cfg.get("context_word_budget", CONTEXT_WORD_BUDGET) or CONTEXT_WORD_BUDGET)
+    chunk_cap = int(cfg.get("chunk_word_cap", CHUNK_WORD_CAP) or CHUNK_WORD_CAP)
 
     matched_titles = _match_titles(query, set_name)
     title_mode = len(matched_titles) > 0
@@ -859,7 +961,7 @@ def retrieve_rag(set_name, query, top_k, filter_kind, cfg,
         min_keep = 1 if parent_active else 0
         for h in hits:
             w = len(h["document"].split())
-            if len(kept) >= min_keep and used + w > CONTEXT_WORD_BUDGET:
+            if len(kept) >= min_keep and used + w > budget:
                 break
             kept.append(h)
             used += w
@@ -870,7 +972,7 @@ def retrieve_rag(set_name, query, top_k, filter_kind, cfg,
         fiction_only = bool(fiction_hits and not nonfiction_hits)
         # Parent text is already size-capped at ingest (parent_tokens); only
         # child chunks need the per-chunk word cap.
-        context = build_context(hits, max_words=0 if parent_active else CHUNK_WORD_CAP)
+        context = build_context(hits, max_words=0 if parent_active else chunk_cap)
 
         sources = []
         seen_src = set()

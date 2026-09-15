@@ -99,6 +99,28 @@ def default_set_name() -> str:
     return DEFAULT_SET
 
 
+def _reranker():
+    """Lazy-load the cross-encoder reranker so MCP search matches the web
+    server's retrieval quality (hybrid fusion + rerank). Returns None when
+    disabled or unavailable."""
+    key = "reranker"
+    if key not in _resources:
+        cfg = _load_agent().load_config()
+        if not cfg.get("rerank_enabled", True):
+            _resources[key] = None
+        else:
+            try:
+                from sentence_transformers import CrossEncoder
+                model = cfg.get("rerank_model")
+                with _muted_stdout():
+                    _resources[key] = CrossEncoder(
+                        model, device=cfg.get("embed_device", "cpu"))
+            except Exception as e:
+                print(f"[mcp] reranker unavailable: {e}")
+                _resources[key] = None
+    return _resources[key]
+
+
 def list_collection_names() -> list[str]:
     import chromadb
     client = chromadb.PersistentClient(path=str(RAG_ROOT / "index"))
@@ -149,12 +171,24 @@ def _render_hits(hits: list) -> str:
         meta = h["metadata"] or {}
         kind = meta.get("kind", "unknown")
         kind_label = "[FICTION]" if kind == "fiction" else "[NON-FICTION]"
-        source = f"{meta.get('title', 'Unknown')} ({meta.get('source', 'unknown')})"
+        title = meta.get("title", "Unknown")
+        source = f"{title} ({meta.get('source', 'unknown')})"
         page = meta.get("page", "")
         page_str = f", p.{page}" if page else ""
-        score = 1 - h["distance"]
-        lines.append(f"## Source {i+1} {kind_label} (score {score:.3f}) — {source}{page_str}")
-        lines.append(h["document"])
+        score = h.get("rerank_score")
+        if score is None and h.get("distance") is not None:
+            score = round(1 - h["distance"], 3)
+        elif score is not None:
+            score = round(float(score), 3)
+        score_str = f" (score {score:.3f})" if score is not None else ""
+        # Surface the chapter/section heading when parent-child retrieval
+        # collapsed a child to its parent section — lets the model cite the
+        # exact part of the book (and stay on-topic) instead of the whole work.
+        section = meta.get("section_title") or ""
+        section_str = f" — {section.strip()}" if section and section.strip() else ""
+        lines.append(f"## Source {i+1} {kind_label}{score_str} — {source}{section_str}{page_str}")
+        doc = h.get("document", "")
+        lines.append(doc)
         lines.append("")
     return "\n".join(lines)
 
@@ -166,7 +200,15 @@ mcp = FastMCP("rag-library", instructions=(
     "Use search_library to retrieve relevant excerpts before answering, and "
     "cite the source title from the returned excerpts. Excerpts tagged "
     "[FICTION] are fiction and must never be presented as fact. If retrieval "
-    "turns up no strong match, say so and answer from your own knowledge."))
+    "turns up no strong match, say so and answer from your own knowledge.\n\n"
+    "STOP RULE: Perform AT MOST ONE search_library call per user question, then "
+    "answer immediately from what it returned. Do NOT call search_library "
+    "again with the same or a reworded query — the library is index-only, "
+    "re-searching the same topic returns the same excerpts. Re-reading the "
+    "results never reveals new books; instead answer with what you have and, "
+    "if coverage is genuinely missing, tell the user plainly. Only issue a "
+    "second search if the user explicitly names a DIFFERENT book or topic. "
+    "Never loop, never ask 'shall I search again'. A final answer is required."))
 
 
 @mcp.tool()
@@ -192,6 +234,10 @@ def search_library(query: str, set_name: str = "", top_k: int = 6,
     Never answer from your own knowledge alone when the user asks about their
     library — search first, then cite the source titles from the results.
 
+    Call ONCE per question and then answer — do not keep calling it. The library
+    is index-only; re-searching the same or reworded query returns the same
+    excerpts, so looping on this tool wastes turns and never finds new material.
+
     Args:
       query: the question or search phrase (natural language).
       set_name: which index collection to search (see list_collections). Leave empty for the default.
@@ -204,29 +250,37 @@ def search_library(query: str, set_name: str = "", top_k: int = 6,
     top_k = max(1, min(int(top_k), 8))
     collection = _collection(set_name)
 
-    pool_k = min(top_k * 3, 24)
+    # Use the SAME full retrieval pipeline as the web server / eval harness:
+    # title routing (query names a specific work -> route to its chunks),
+    # hybrid dense+BM25 fusion, cross-encoder rerank, and parent-child
+    # generation. This keeps MCP search quality on par with the web UI and
+    # fixes gaps like "Which nations does Gulliver visit?" failing to surface
+    # Gulliver's Travels.
     with _muted_stdout():
-        hits = agent.retrieve(query, _embedder(), collection, top_k=pool_k,
-                              filter_kind=filter_kind or None, cfg=cfg)
-    hits = agent.diversify_hits(hits, limit=top_k)
+        rag = agent.retrieve_rag(
+            set_name, query, top_k, filter_kind or None, cfg,
+            embedder=_embedder(), collection=collection,
+            client=None, reranker=_reranker(), backend=cfg.get("lexical_backend", "auto"))
+    hits = rag["hits"]
     if not hits:
         return ("(No matching documents were retrieved from the library for "
                 f"this query in set '{set_name}'.)")
 
     kept, used = [], 0
+    budget = int(cfg.get("context_word_budget", 1000) or 1000)
     for h in hits:
-        if used + len(h["document"].split()) > 1500:
+        if used + len(h["document"].split()) > budget:
             break
         kept.append(h)
         used += len(h["document"].split())
     hits = kept
 
-    fiction = [h for h in hits if h["metadata"].get("kind") == "fiction"]
-    nonfiction = [h for h in hits if h["metadata"].get("kind") != "fiction"]
-    low_rel, reason = agent.detect_low_relevance(query, hits, cfg)
+    fiction_only = rag["fiction_only"]
+    low_rel = rag["low_relevance"]
+    reason = rag["relevance_reason"]
 
     head = [f"# Library search: \"{query}\"  (set: {set_name})", ""]
-    if fiction and not nonfiction:
+    if fiction_only:
         head.append("NOTE: ALL retrieved sources are FICTION. Do NOT present "
                     "them as fact.")
         head.append("")
@@ -236,13 +290,20 @@ def search_library(query: str, set_name: str = "", top_k: int = 6,
                     f"({note}). Say the library lacks direct coverage and "
                     "answer from your own knowledge.")
         head.append("")
-    return "\n".join(head) + _render_hits(hits)
+    out = "\n".join(head) + _render_hits(hits)
+    out += ("\n\n[REMINDER] These are the library's best matches for this "
+            "question. Answer now using them; re-searching the same topic "
+            "will not surface different books.")
+    return out
 
 
 @mcp.tool()
 def summarize_work(title: str, set_name: str = "", top_k: int = 8) -> str:
     """Retrieve excerpts of ONE named work (book) from the library so the model
     can summarize or discuss it specifically.
+
+    Call ONCE for a given work and then answer; do not re-call for the same
+    title — the returned excerpts are already the best of that book.
 
     Args:
       title: the title (or distinctive part of it) of the book.
@@ -260,14 +321,20 @@ def summarize_work(title: str, set_name: str = "", top_k: int = 8) -> str:
         return (f"(No work matching '{title}' was found in set '{set_name}'. "
                 "Try a different title or use search_library instead.)")
 
-    where = {"title": {"$in": matched}}
+    # Route through retrieve_rag's titled path so summaries get the same
+    # hybrid + rerank + parent-child treatment as search / the web UI.
     with _muted_stdout():
-        hits = agent.retrieve(title, _embedder(), collection, top_k=min(top_k * 3, 24),
-                              cfg=cfg, where_extra=where)
-    hits = agent.diversify_hits(hits, limit=None, max_per_title=top_k)
+        rag = agent.retrieve_rag(
+            set_name, title, top_k, None, cfg,
+            embedder=_embedder(), collection=collection,
+            client=None, reranker=_reranker(),
+            backend=cfg.get("lexical_backend", "auto"))
+    hits = rag["hits"]
 
     fiction = [h for h in hits if h["metadata"].get("kind") == "fiction"]
-    head = [f"# Summarize requested work(s): {', '.join(matched)}  (set: {set_name})", ""]
+    honorific = rag["matched_titles"] or matched
+    head = [f"# Summarize requested work(s): {', '.join(honorific[:4])}  "
+            f"(set: {set_name})", ""]
     if fiction:
         head.append("NOTE: These works are FICTION. Present them as fiction, "
                     "not fact.")
