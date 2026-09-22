@@ -33,6 +33,7 @@ import sys
 from pathlib import Path
 
 os.environ["CUDA_VISIBLE_DEVICES"] = ""  # Force CPU for embeddings
+os.environ.setdefault("HF_HUB_OFFLINE", "1")  # Skip HuggingFace remote checks; models cached from first-run
 
 from mcp.server.fastmcp import FastMCP
 
@@ -267,7 +268,7 @@ def search_library(query: str, set_name: str = "", top_k: int = 6,
                 f"this query in set '{set_name}'.)")
 
     kept, used = [], 0
-    budget = int(cfg.get("context_word_budget", 1000) or 1000)
+    budget = int(cfg.get("context_word_budget", 3000) or 3000)
     for h in hits:
         if used + len(h["document"].split()) > budget:
             break
@@ -298,6 +299,88 @@ def search_library(query: str, set_name: str = "", top_k: int = 6,
 
 
 @mcp.tool()
+def list_books(topic: str = "", set_name: str = "", filter_kind: str = "") -> str:
+    """Enumerate the library as a catalog table of titles (not passage
+    excerpts). Use this for \"list/show/find/what books about ...\" requests
+    where the user wants to browse titles rather than read any one work.
+
+    Args:
+      topic: topic phrase to filter by, or empty to list the entire library.
+      set_name: which index collection (see list_collections). Leave empty for the default.
+      filter_kind: 'fiction' or 'nonfiction' to restrict, or leave empty for all.
+    """
+    import catalog
+    agent = _load_agent()
+    cfg = agent.load_config()
+    set_name = set_name or default_set_name()
+    books = catalog.find_books(
+        topic or "", set_name, filter_kind or None, cfg,
+        collection=_collection(set_name), embedder=_embedder())
+    if not books:
+        return (f"(No books matching{f' topic {topic!r}' if topic else ''} "
+                f"were found in set '{set_name}'.)")
+    head = (f"# Library catalog{f' — books about **{topic}**' if topic else ''}"
+            f"  (set: {set_name})\n\n"
+            f"Found {len(books)} matching title(s).\n\n")
+    out = head + catalog.render_table(books[:50])
+    if len(books) > 50:
+        out += f"\n\n_(truncated — {len(books) - 50} more not shown)_"
+    return out
+
+
+@mcp.tool()
+def make_quiz(topic: str, set_name: str = "", count: int = 10) -> str:
+    """Generate a structured practice quiz on a topic or a named work, with
+    collapsible answers and per-question source citations.
+
+    Args:
+      topic: the topic or book title to quiz on.
+      set_name: which index collection (see list_collections). Leave empty for the default.
+      count: how many questions to generate (1-50).
+    """
+    import catalog
+    import study
+    agent = _load_agent()
+    cfg = agent.load_config()
+    set_name = set_name or default_set_name()
+    try:
+        count = max(1, min(int(count or 10), 50))
+    except (TypeError, ValueError):
+        count = int(cfg.get("quiz_default_count", 10) or 10)
+    collection = _collection(set_name)
+
+    matched = agent._match_titles(topic, set_name, limit=4)
+    material = None
+    MC, MW = 10, 140
+    with _muted_stdout():
+        if matched:
+            where = {"title": {"$in": matched}}
+            hits = agent.retrieve(", ".join(matched), _embedder(), collection,
+                                  top_k=MC, cfg=cfg, where_extra=where)
+            material = agent.build_context(hits[:MC], max_words=MW)
+        else:
+            books = catalog.find_books(topic, set_name, None, cfg,
+                                       collection=collection, embedder=_embedder())
+            titles = [b["title"] for b in books[:5]]
+            if titles:
+                where = {"title": {"$in": titles}}
+                hits = agent.retrieve(topic, _embedder(), collection,
+                                      top_k=MC, cfg=cfg, where_extra=where)
+                material = agent.build_context(hits[:MC], max_words=MW)
+    if not material:
+        return (f"(No material found to quiz on{topic and f' topic {topic!r}' or ''}"
+                f" in set '{set_name}'.)")
+    saved = dict(cfg)
+    saved["quiz_default_count"] = count
+    questions, err = study.generate_quiz(topic or ", ".join(matched), material,
+                                          saved, agent.setup_client(cfg))
+    if not questions:
+        return f"(Quiz generation failed: {err or 'no questions parsed'})"
+    return (f"# Quiz{f' — {topic}' if topic else ''}  (set: {set_name})\n\n"
+            + study.render_markdown(questions))
+
+
+@mcp.tool()
 def summarize_work(title: str, set_name: str = "", top_k: int = 8) -> str:
     """Retrieve excerpts of ONE named work (book) from the library so the model
     can summarize or discuss it specifically.
@@ -316,7 +399,7 @@ def summarize_work(title: str, set_name: str = "", top_k: int = 8) -> str:
     top_k = max(1, min(int(top_k), 10))
     collection = _collection(set_name)
 
-    matched = _match_titles(title, set_name, limit=4)
+    matched = agent._match_titles(title, set_name, limit=4)
     if not matched:
         return (f"(No work matching '{title}' was found in set '{set_name}'. "
                 "Try a different title or use search_library instead.)")

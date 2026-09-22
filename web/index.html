@@ -115,6 +115,20 @@
   .source.open .snippet { display: block; }
   .fiction-banner { background: rgba(255,122,195,.08); border: 1px solid var(--fiction); color: var(--fiction); padding: 10px 14px; border-radius: 8px; font-size: 13px; }
   .lowrel-banner { background: rgba(246,196,83,.08); border: 1px solid var(--warn); color: var(--warn); padding: 10px 14px; border-radius: 8px; font-size: 13px; }
+  .badge-pill { display:inline-block; margin-right:6px; padding:1px 8px; border-radius:10px; font-size:11px; letter-spacing:.5px; vertical-align:1px; }
+  .badge-pill.list { background: rgba(61,220,132,.12); color: var(--ok); }
+  .badge-pill.quiz { background: rgba(246,196,83,.12); color: var(--warn); }
+  .answer table { border-collapse: collapse; width: 100%; margin: 8px 0; font-size: 13px; }
+  .answer th, .answer td { border: 1px solid var(--border); padding: 5px 8px; text-align: left; word-break: break-word; vertical-align: top; }
+  .answer th { background: var(--panel); }
+  .answer h3, .answer h4 { margin: 14px 0 6px; }
+  .answer pre { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 10px; overflow-x: auto; font-size: 12.5px; }
+  .answer code { background: var(--panel); border-radius: 3px; padding: 1px 4px; font-size: 12.5px; }
+  .answer pre code { background: none; padding: 0; }
+  .answer details { margin-top: 8px; border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; background: var(--panel); }
+  .answer details[open] { padding-bottom: 10px; }
+  .answer summary { cursor: pointer; color: var(--muted); font-weight: 600; }
+  .chat-msg[data-list-mode] .source-section, .chat-msg[data-quiz-mode] .source-section { display: none; }
   #chatBlocked { display: none; margin: 12px 0 0; padding: 10px 14px; border-radius: 8px; font-size: 13px; color: var(--warn); border: 1px solid var(--warn); background: rgba(246,196,83,.06); }
   #chatBlocked.show { display: block; }
   #tab-chat.active { flex: 1; min-height: 0; display: flex; flex-direction: column; }
@@ -194,6 +208,8 @@
   }
 
 </style>
+<script src="vendor/marked.min.js"></script>
+<script src="vendor/purify.min.js"></script>
 </head>
 <body>
 <header>
@@ -235,8 +251,10 @@
       </div>
       <div class="btn-row">
         <button class="btn secondary" id="btnCheckLlm">Check LLM API</button>
+        <button class="btn secondary" id="btnTestLlm">Test model</button>
         <button class="btn" id="btnApplyLlm">Apply LLM settings</button>
       </div>
+      <div class="small muted" id="llmLoadedHint" style="margin-top:6px"></div>
       <div class="hidden" id="selfhostPanel" style="margin-top:14px;border-top:1px solid var(--border);padding-top:12px">
         <h3 style="margin-bottom:4px">Self-hosted (llama-server)</h3>
         <div class="small muted" id="selfhostInfo">Detecting&hellip;</div>
@@ -340,6 +358,92 @@
       </div>
       <div class="btn-row">
         <button class="btn" id="btnSaveConfig">Save config</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3>Chat, catalog &amp; summaries</h3>
+      <div class="grid">
+        <div>
+          <label>Chat mode</label>
+          <select id="cfgChatMode">
+            <option value="agentic">Agentic (tool loop, streaming)</option>
+            <option value="single">Single-shot (passage retrieval only)</option>
+          </select>
+        </div>
+        <div>
+          <label>Show model thinking <span class="small muted">(reasoning_content)</span></label>
+          <select id="cfgShowThinking">
+            <option value="false">No (hide chain-of-thought)</option>
+            <option value="true">Yes (stream thinking)</option>
+          </select>
+        </div>
+        <div>
+          <label>Context word budget</label>
+          <input type="number" id="cfgContextBudget" min="200" max="20000">
+        </div>
+        <div>
+          <label>Chunk word cap</label>
+          <input type="number" id="cfgChunkWordCap" min="50" max="2000">
+        </div>
+        <div>
+          <label>History message limit</label>
+          <input type="number" id="cfgHistoryMsgLimit" min="0" max="100">
+        </div>
+        <div>
+          <label>History char budget</label>
+          <input type="number" id="cfgHistoryCharBudget" min="0" max="100000">
+        </div>
+        <div>
+          <label>Catalog / list mode</label>
+          <select id="cfgCatalogEnabled">
+            <option value="true">Enabled</option>
+            <option value="false">Disabled</option>
+          </select>
+        </div>
+        <div>
+          <label>Catalog clarify threshold</label>
+          <input type="number" id="cfgCatalogClarify" min="1" max="1000">
+        </div>
+        <div>
+          <label>Catalog max rows</label>
+          <input type="number" id="cfgCatalogMaxRows" min="10" max="5000">
+        </div>
+        <div>
+          <label>Catalog semantic pool</label>
+          <input type="number" id="cfgCatalogPool" min="10" max="5000">
+        </div>
+        <div>
+          <label>Summary strategy</label>
+          <select id="cfgSummaryStrategy">
+            <option value="map_reduce">Map-reduce (deep)</option>
+            <option value="single">Single pass</option>
+          </select>
+        </div>
+        <div>
+          <label>Summary max chunks</label>
+          <input type="number" id="cfgSummaryMaxChunks" min="5" max="500">
+        </div>
+        <div>
+          <label>Summary context budget</label>
+          <input type="number" id="cfgSummaryContextBudget" min="500" max="50000">
+        </div>
+        <div>
+          <label>Quiz default count</label>
+          <input type="number" id="cfgQuizDefaultCount" min="1" max="100">
+        </div>
+        <div>
+          <label>Max tokens (default QA)</label>
+          <input type="number" id="cfgMaxTokensDefault" min="64">
+        </div>
+        <div>
+          <label>Max tokens (quiz)</label>
+          <input type="number" id="cfgMaxTokensQuiz" min="64">
+        </div>
+        <div>
+          <label>Max tokens (summary)</label>
+          <input type="number" id="cfgMaxTokensSummary" min="64">
+        </div>
       </div>
     </div>
   </section>
@@ -680,6 +784,26 @@ function escapeHtml(s) {
   return (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
+// ── Markdown rendering (marked + DOMPurify) ─────────────────────────────────
+// Assistant turns are rendered as sanitized HTML so tables, quizzes (<details>
+// answer reveals) and code blocks display properly. User turns stay escaped.
+
+let mdConfig = null;
+function mdSanitize(html) {
+  if (typeof DOMPurify === 'undefined') return html; // degrade: no sanitizer
+  mdConfig = mdConfig || { ALLOWED_TAGS: ['p','br','hr','h1','h2','h3','h4','h5','h6','strong','em','del','u','code','pre','blockquote','ul','ol','li','a','table','thead','tbody','tr','th','td','details','summary','span','div' ], ALLOWED_ATTR: ['href','class','title','open'], ALLOW_DATA_ATTR: false };
+  const purify = (typeof DOMPurify.sanitize === 'function') ? DOMPurify
+    : (typeof DOMPurify.default === 'object' && DOMPurify.default.sanitize ? DOMPurify.default : DOMPurify(window));
+  return purify.sanitize(html, mdConfig);
+}
+function renderMarkdown(md) {
+  if (typeof marked === 'undefined') return escapeHtml(md || '').replace(/\n/g, '<br>');
+  return mdSanitize(marked.parse(md || ''));
+}
+function setAnswerHtml(el, md) {
+  el.innerHTML = renderMarkdown(md || '');
+}
+
 // Disable a button while a promise runs (guards against double-clicks).
 async function runBusy(btn, fn) {
   if (!btn) return fn();
@@ -767,6 +891,20 @@ async function refreshStatus() {
       $('#llmModelList').innerHTML = llm.models.map(m =>
         '<option value="' + String(m).replace(/&/g, '&amp;').replace(/"/g, '&quot;') + '"></option>'
       ).join('');
+    }
+    const hint = $('#llmLoadedHint');
+    if (hint) {
+      const sel = ($('#cfgLlmModel').value || '').trim();
+      if (llm.online && llm.native && sel && llm.model_states) {
+        const st = llm.model_states[sel];
+        if (st && st !== 'loaded') {
+          hint.textContent = '\u26a0 "' + sel + '" is not currently loaded in LM Studio. Selecting it will require switching it in LM Studio first.';
+          hint.style.color = 'var(--warn)';
+        } else if (st === 'loaded') {
+          hint.textContent = '\u2713 "' + sel + '" is loaded.';
+          hint.style.color = 'var(--muted)';
+        } else { hint.textContent = ''; }
+      } else { hint.textContent = ''; }
     }
   } catch (e) { $('#llmPill').textContent = 'LLM: ???'; }
 }
@@ -970,6 +1108,23 @@ async function loadConfig() {
   $('#cfgLlmApiKey').value = c.llm_api_key_set ? '••••••••' : '';
   $('#cfgLlmTemp').value = c.llm_temperature ?? 0.3;
   $('#cfgLlmMaxTokens').value = c.llm_max_tokens || 2048;
+  $('#cfgChatMode').value = c.chat_mode || 'agentic';
+  $('#cfgShowThinking').value = String(c.show_thinking ?? false);
+  $('#cfgContextBudget').value = c.context_word_budget || 3000;
+  $('#cfgChunkWordCap').value = c.chunk_word_cap || 300;
+  $('#cfgHistoryMsgLimit').value = c.history_msg_limit ?? 12;
+  $('#cfgHistoryCharBudget').value = c.history_char_budget || 10000;
+  $('#cfgCatalogEnabled').value = String(c.catalog_enabled ?? true);
+  $('#cfgCatalogClarify').value = c.catalog_clarify_threshold ?? 20;
+  $('#cfgCatalogMaxRows').value = c.catalog_max_rows || 200;
+  $('#cfgCatalogPool').value = c.catalog_semantic_pool || 500;
+  $('#cfgSummaryStrategy').value = c.summary_strategy || 'map_reduce';
+  $('#cfgSummaryMaxChunks').value = c.summary_max_chunks || 40;
+  $('#cfgSummaryContextBudget').value = c.summary_context_budget || 8000;
+  $('#cfgQuizDefaultCount').value = c.quiz_default_count || 10;
+  $('#cfgMaxTokensDefault').value = c.max_tokens_default || 2048;
+  $('#cfgMaxTokensQuiz').value = c.max_tokens_quiz || 4096;
+  $('#cfgMaxTokensSummary').value = c.max_tokens_summary || 4096;
   $('#cfgChunkTokens').value = c.chunk_tokens || 330;
   $('#cfgChunkOverlap').value = c.chunk_overlap || 60;
   $('#cfgTopK').value = c.retrieval_top_k || 10;
@@ -997,6 +1152,23 @@ $('#btnSaveConfig').onclick = () => runBusy($('#btnSaveConfig'), async () => {
     llm_model: $('#cfgLlmModel').value.trim(),
     llm_temperature: parseFloat($('#cfgLlmTemp').value),
     llm_max_tokens: parseInt($('#cfgLlmMaxTokens').value) || 2048,
+    max_tokens_default: parseInt($('#cfgMaxTokensDefault').value) || 2048,
+    max_tokens_quiz: parseInt($('#cfgMaxTokensQuiz').value) || 4096,
+    max_tokens_summary: parseInt($('#cfgMaxTokensSummary').value) || 4096,
+    chat_mode: $('#cfgChatMode').value,
+    show_thinking: $('#cfgShowThinking').value === 'true',
+    context_word_budget: parseInt($('#cfgContextBudget').value) || 3000,
+    chunk_word_cap: parseInt($('#cfgChunkWordCap').value) || 300,
+    history_msg_limit: parseInt($('#cfgHistoryMsgLimit').value) || 12,
+    history_char_budget: parseInt($('#cfgHistoryCharBudget').value) || 10000,
+    catalog_enabled: $('#cfgCatalogEnabled').value === 'true',
+    catalog_clarify_threshold: parseInt($('#cfgCatalogClarify').value) || 20,
+    catalog_max_rows: parseInt($('#cfgCatalogMaxRows').value) || 200,
+    catalog_semantic_pool: parseInt($('#cfgCatalogPool').value) || 500,
+    summary_strategy: $('#cfgSummaryStrategy').value,
+    summary_max_chunks: parseInt($('#cfgSummaryMaxChunks').value) || 40,
+    summary_context_budget: parseInt($('#cfgSummaryContextBudget').value) || 8000,
+    quiz_default_count: parseInt($('#cfgQuizDefaultCount').value) || 10,
     chunk_tokens: parseInt($('#cfgChunkTokens').value) || 330,
     chunk_overlap: parseInt($('#cfgChunkOverlap').value) || 60,
     retrieval_top_k: parseInt($('#cfgTopK').value) || 10,
@@ -1016,6 +1188,22 @@ $('#btnSaveConfig').onclick = () => runBusy($('#btnSaveConfig'), async () => {
 });
 
 $('#btnCheckLlm').onclick = () => { toast('Checking...', 400); setTimeout(refreshStatus, 1500); };
+$('#btnTestLlm').onclick = () => runBusy($('#btnTestLlm'), async () => {
+  const hint = $('#llmLoadedHint');
+  hint.textContent = 'Testing \u2014 this may load the model\u2026';
+  hint.style.color = 'var(--muted)';
+  let r;
+  try { r = await api.post('/api/llm/test'); }
+  catch (e) { hint.textContent = 'Test failed: ' + e.message; hint.style.color = 'var(--warn)'; return; }
+  if (r.loaded) {
+    hint.textContent = '\u2713 Model "' + r.model + '" responded (' + (r.sample || 'ok') + ').';
+    hint.style.color = 'var(--muted)';
+  } else {
+    hint.textContent = '\u2717 Model "' + r.model + '" not usable: ' + (r.error || 'no response') + '. Select/load it in LM Studio first.';
+    hint.style.color = 'var(--warn)';
+  }
+  refreshStatus();
+});
 $('#btnApplyLlm').onclick = () => runBusy($('#btnApplyLlm'), async () => {
   const r = await api.post('/api/llm/apply', {
     llm_base_url: $('#cfgLlmUrl').value.trim(),
@@ -1546,9 +1734,15 @@ function renderConvMessages(conv) {
       out.appendChild(el('div', 'chat-msg user', `<div class="who">you <span class="when">${chatTime(m.ts)}</span></div>${escapeHtml(m.content)}`));
     } else {
       const box = el('div', 'chat-msg');
-      box.appendChild(el('div', 'who', `agent <span class="when">${chatTime(m.ts)}</span>`));
-      box.insertAdjacentHTML('beforeend', escapeHtml(m.content || '').replace(/\n/g, '<br>'));
       const meta = m.meta || {};
+      if (meta.list_mode) box.setAttribute('data-list-mode', '1');
+      if (meta.quiz_mode) box.setAttribute('data-quiz-mode', '1');
+      const whoHtml = 'agent <span class="when">' + chatTime(m.ts) + '</span>'
+        + (meta.list_mode ? '<span><span class="badge-pill list">&#128203; LIST</span></span>' : '')
+        + (meta.quiz_mode ? '<span><span class="badge-pill quiz">&#129504; QUIZ</span></span>' : '');
+      box.appendChild(el('div', 'who', whoHtml));
+      box.appendChild(el('div', 'answer'));
+      setAnswerHtml(box.querySelector('.answer'), m.content || '');
       if (meta.fiction_only) {
         box.appendChild(el('div', 'fiction-banner', '&#9888; All retrieved sources are fictional works. The answer is drawn from fiction and must not be treated as fact.'));
       }
@@ -1557,8 +1751,10 @@ function renderConvMessages(conv) {
       }
       const sources = meta.sources || [];
       if (sources.length) {
-        box.appendChild(el('div', '', `<div class="small muted" style="margin:12px 0 4px">Sources (${sources.length}):</div>`));
-        for (const s of sources) box.appendChild(makeSource(s));
+        const sec = el('div', 'source-section');
+        sec.appendChild(el('div', '', `<div class="small muted" style="margin:12px 0 4px">Sources (${sources.length}):</div>`));
+        for (const s of sources) sec.appendChild(makeSource(s));
+        box.appendChild(sec);
       }
       out.appendChild(box);
     }
@@ -1649,6 +1845,7 @@ async function postSSE(url, body, handlers) {
     if (ev === 'delta') handlers.onDelta && handlers.onDelta(data);
     else if (ev === 'done') handlers.onDone && handlers.onDone(data);
     else if (ev === 'error') handlers.onError && handlers.onError(data);
+    else if (ev === 'progress') handlers.onProgress && handlers.onProgress(data);
   };
   for (;;) {
     const { done, value } = await reader.read();
@@ -1698,9 +1895,12 @@ async function ask() {
 
     let gotAny = false;
     let errMsg = null;
+    let streamBuf = '';
+    let renderTimer = null;
     const agentBox = el('div', 'chat-msg');
     const who = el('div', 'who', `agent <span class="when">${chatTime()}</span>`);
     const ansEl = el('div', 'answer');
+    const renderThrottled = () => { if (renderTimer) return; renderTimer = setTimeout(() => { renderTimer = null; setAnswerHtml(ansEl, streamBuf); scrollChat(); }, 120); };
     agentBox.appendChild(who); agentBox.appendChild(ansEl);
 
     await postSSE('/api/chat/stream', {
@@ -1708,26 +1908,42 @@ async function ask() {
     }, {
       onDelta: (t) => {
         gotAny = true;
-        if (typeof t === 'string') ansEl.insertAdjacentText('beforeend', t);
+        if (typeof t === 'string') { streamBuf += t; renderThrottled(); }
         scrollChat();
       },
       onDone: (d) => {
         gotAny = true;
         thinking.remove();
-        const content = (d && d.answer) || ansEl.textContent;
-        ansEl.textContent = '';
-        ansEl.insertAdjacentHTML('beforeend', escapeHtml(content || '').replace(/\n/g, '<br>'));
+        if (renderTimer) { clearTimeout(renderTimer); renderTimer = null; }
         const meta = d || {};
+        const content = (d && d.answer) ?? streamBuf;
+        streamBuf = content || '';
+        setAnswerHtml(ansEl, streamBuf);
+        if (meta.list_mode) agentBox.setAttribute('data-list-mode', '1');
+        if (meta.quiz_mode) agentBox.setAttribute('data-quiz-mode', '1');
+        let whoHtml = 'agent <span class="when">' + chatTime() + '</span>';
+        if (meta.list_mode) whoHtml += '<span><span class="badge-pill list">&#128203; LIST</span></span>';
+        if (meta.quiz_mode) whoHtml += '<span><span class="badge-pill quiz">&#129504; QUIZ</span></span>';
+        who.innerHTML = whoHtml;
         if (meta.fiction_only) agentBox.appendChild(el('div', 'fiction-banner', '&#9888; All retrieved sources are fictional works. The answer is drawn from fiction and must not be treated as fact.'));
         if (meta.low_relevance) agentBox.appendChild(el('div', 'lowrel-banner', '&#9888; The library has no strong match for this question. ' + escapeHtml(meta.relevance_reason || 'Low relevance') + ' — the answer comes from the model\'s own knowledge. Propose related searches to surface nearby material.'));
         const sources = meta.sources || [];
         if (sources.length) {
-          agentBox.appendChild(el('div', '', `<div class="small muted" style="margin:12px 0 4px">Sources (${sources.length}):</div>`));
-          for (const s of sources) agentBox.appendChild(makeSource(s));
+          const sec = el('div', 'source-section');
+          sec.appendChild(el('div', '', `<div class="small muted" style="margin:12px 0 4px">Sources (${sources.length}):</div>`));
+          for (const s of sources) sec.appendChild(makeSource(s));
+          agentBox.appendChild(sec);
         }
       },
       onError: (d) => { errMsg = (d && (d.error || d.message)) || 'Stream error.'; },
+      onProgress: (d) => {
+        if (d && d.message) {
+          thinking.innerHTML = `<span class="spinner"></span>${escapeHtml(d.message)}`;
+          scrollChat();
+        }
+      },
     });
+    if (renderTimer) { clearTimeout(renderTimer); renderTimer = null; }
 
     if (thinking.parentNode) thinking.remove();
     if (errMsg || !gotAny) {

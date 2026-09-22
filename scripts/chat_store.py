@@ -100,9 +100,31 @@ def clear_conversation(cid: str) -> dict | None:
         return None
     conv["messages"] = []
     conv["title"] = "New chat"
+    conv.pop("pending_catalog", None)
     conv["updated"] = _now()
     _path(cid).write_text(json.dumps(conv, indent=2), encoding="utf-8")
     return conv
+
+
+def set_pending_catalog(cid: str, pending: dict | None) -> dict | None:
+    """Persist (or clear) the pending catalog clarification state."""
+    conv = get_conversation(cid)
+    if not conv:
+        return None
+    if pending:
+        conv["pending_catalog"] = pending
+    else:
+        conv.pop("pending_catalog", None)
+    conv["updated"] = _now()
+    _path(cid).write_text(json.dumps(conv, indent=2), encoding="utf-8")
+    return conv
+
+
+def get_pending_catalog(cid: str) -> dict | None:
+    conv = get_conversation(cid)
+    if not conv:
+        return None
+    return conv.get("pending_catalog") or None
 
 
 def add_message(cid: str, role: str, content: str, meta: dict = None) -> dict | None:
