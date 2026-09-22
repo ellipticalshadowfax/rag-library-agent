@@ -276,11 +276,32 @@ so one book can't monopolize the context. In parent–child mode, multiple child
 from the same section are **collapsed to one parent** — the best child "wins" and
 its parent text is used for generation.
 
-The final context is trimmed to a **word budget** (`context_word_budget: 1000`
-words, each chunk capped at `chunk_word_cap: 200`) so it fits in the LLM's
+The final context is trimmed to a **word budget** (`context_word_budget: 3000`
+words, each chunk capped at `chunk_word_cap: 300`) so it fits in the LLM's
 context window.
 The `sources` list you see in the UI is deduped by `(title, source)`, so a single
 book appears as **one** source even if several of its chunks are in the context.
+
+### Step 7 — Catalog/list mode (before retrieval)
+
+A query like "list books about horsemanship" isn't a passage question — it's a
+**browse**. Rather than run the capped passage retrieval (top‑8 chunks), the
+server detects the request deterministically (`catalog.py`) *before* any
+retrieval and answers from the `manifest.db` `files` table:
+
+1. Extract the topic phrase ("horsemanship") and any fiction/non‑fiction filter.
+2. Rank the whole set's titles with a **three‑leg reciprocal‑rank fuse**:
+   title/tags/path lexical overlap, per‑title dense retrieval aggregates, and
+   per‑title BM25 aggregates.
+3. Render a GFM Markdown table (📖 fiction / 📚 nonfiction, tags truncated, path
+   wrapped) — **no LLM call**. If more than `catalog_clarify_threshold` titles
+   match, it shows the first 20 and prompts "reply **all**" to expand, persisting
+   the pending state so a follow‑up "all" resolves correctly.
+4. Quiz requests ("quiz me on Y") take priority and route to `study.py` instead.
+
+Because listing is deterministic and LLM‑free, it's complete and cheap — the 
+passage cap no longer restricts browsing. List/quiz requests are answered on the
+web SSE, the blocking `/api/chat`, and the OpenAI‑compatible endpoints alike.
 
 ---
 
@@ -306,7 +327,7 @@ relevant author — pulling in related passages the first search missed.
 **Follow-up questions in a conversation** are handled separately but simply: prior
 turns of the conversation are injected into the message history before your new
 question, so the LLM has context about what was already discussed (bounded to the
-last 12 messages / 6000 chars).
+last `history_msg_limit` messages / `history_char_budget` chars, default 12 / 10000).
 
 ---
 
@@ -367,6 +388,17 @@ as fiction, and must say plainly when the library has no coverage.
 
 The chat streams tokens in real time (server-sent events: `delta`/`done`/`error`),
 so you see the answer build up word by word rather than waiting for the whole thing.
+Assistant turns render **Markdown** in the browser (via the vendored `marked` +
+DOMPurify), so tables, code blocks, and the quiz `<details>` answer reveals display
+properly; user turns stay escaped.
+
+When `chat_mode: "agentic"` (the default) the **streaming agentic loop** runs too:
+tool-calling steps are non-streamed, but a subtle `progress` event ("Resolving…")
+fires about every 1.5s during tool resolution to keep the connection alive, and when
+the model is ready to answer the final answer is regenerated as **one** streamed
+completion whose deltas flow live. `show_thinking: true` forwards the model's
+`reasoning_content` (chain-of-thought) as part of the stream for Qwen3-style models.
+
 Each finished answer is persisted to a conversation JSON file.
 
 ### What "the LLM" actually is: weights, parameters, and MoE
@@ -401,24 +433,35 @@ model can handle more evidence.
 
 ### Agentic tool-calling loop (optional)
 
-For the non-streaming `/api/chat` path, the LLM can go one step further and *act as
-an agent* (`agentic_enabled`). It's given access to tools it can call mid-conversation:
+The agentic loop (`agentic_enabled`) lets the LLM act as an agent — it can call
+tools mid-conversation instead of only answering from the initial retrieval:
 
 - **`search_library`** — run another retrieval search
 - **`get_section`** — pull a full parent section by ID
-- **`summarize_work`** — summarize a specific named book
+- **`summarize_work`** — summarize a specific named book (`deep=true` for a full
+  map-reduce book-wide summary)
+- **`list_books`** — enumerate the catalog as a table of titles
+- **`make_quiz`** — generate a structured practice quiz
 
 The loop runs up to `agentic_max_steps: 3` turns: the model either calls a tool (the
 result is fed back to it) or produces a final answer. If the model's server doesn't
 support function-calling, it falls back to a **ReAct** text protocol, where the model
 emits `call: search_library("...")` lines that the program parses and executes.
 
+Deliberate design decision: **list and quiz requests never use the agent loop.**
+They're detected earlier (in `catalog.py`) and answered by deterministic,
+LLM-free rendering — so "list books about X" returns a complete table regardless of
+the model, and "quiz me on Y" routes through `study.py`'s structured generator. The
+agentic tools remain available for model-initiated browsing inside a normal
+conversation.
+
 ---
 
 ## Part 7 — Other ways to use the library
 
 - **MCP server** (`run_mcp.sh`): exposes the index as *callable tools*
-  (`search_library`, `summarize_work`, `list_collections`) so an MCP-compatible chat
+  (`search_library`, `summarize_work`, `list_collections`, `list_books`,
+  `make_quiz`) so an MCP-compatible chat
   client like LM Studio can ground its answers in your library. The client's own
   model does the chatting and calls the tools as needed.
 - **Agent CLI** (`scripts/agent.py`): chat from the terminal.
@@ -444,6 +487,155 @@ can't silently make retrieval worse. `tuning.md` documents which settings are
 safe to change and which depend on your dataset or hardware. This is how the
 defaults (chunk sizes, RRF k, relevance threshold, context budget) were validated
 as sensible rather than guessed.
+
+Two newer families of knobs aren't exercised by `eval.py` (they're LLM-free or
+user-facing, so quality is judged by inspection instead):
+
+- **Catalog tuning** — `catalog_clarify_threshold`, `catalog_max_rows`, and
+  `catalog_semantic_pool` control how many titles a browse shows before asking
+  for the full list, and how deep the topic-ranking dense pool goes.
+- **Summary/quiz tuning** — `summary_strategy` ("map_reduce" vs "single"),
+  `summary_max_chunks`, `summary_context_budget`, and `quiz_default_count` set
+  the depth of deep summaries and the size of generated quizzes.
+- **LLM loaded-state** — `/api/llm/status` tries LM Studio's native
+  `/api/v0/models` to report which model is loaded (zero side effects). It never
+  auto-probes; a Setup "Test model" button runs an explicit probe (cached 30s).
+  Unloaded models are highlighted in the Setup UI.
+
+These behave consistently across all three chat entry points (web SSE, blocking
+`/api/chat`, and `/v1/chat/completions`).
+
+---
+
+## Part 6 — Catalog ranking: how "list books on X" works
+
+When a query like *"list books about horsemanship"* or *"quiz me on natural horse-*
+*manship"* arrives, the system takes a completely different path from chat retrie-*
+*val*. Instead of searching chunks and feeding context to the LLM, it ranks *entire
+books* by topic relevance using a **three-leg reciprocal-rank fusion** system, then
+presents the results as a Markdown table (`catalog.py`). No LLM is involved in this
+step at all. The quality of those rankings determines whether a user browsing their
+library sees relevant titles upfront.
+
+### The three legs
+
+Each leg independently ranks every title in the collection against the query
+topic. They are then fused together via Reciprocal Rank Fusion (RRF, `k=60`).
+
+| Leg | Code | Mechanism | What it catches | What it misses |
+|-----|------|-----------|-----------------|----------------|
+| **Lexical** | `_title_lexical_leg()` | Token overlap between the query words and the book's `title + tags + source_path`. Exact phrase match scores highest (`+3` bonus), otherwise each shared token adds 1. | Titles that literally contain the query terms: "natural horsemanship" → any book with both words in title/tags/path. | Books that discuss the topic but never use those exact words in the metadata. Synonyms, related concepts, and semantically-close material score zero from this leg. |
+| **Dense** | `_dense_leg()` | Embeds the query with E5 using `prompt_name="query"`, runs vector similarity search over a configurable pool (default 500 chunks, `catalog_semantic_pool`), then aggregates per-title by `(max_similarity_score, chunk_hit_count)`. Higher hit count = stronger signal that the book is broadly relevant. | Semantic matches: "Complete Training of Horse and Rider", Karen Pryor clicker training books, "equine behavior science" — anything the E5 embedder associates with "natural horsemanship" through its learned meaning-space. Works even when no literal tokens overlap. | Only as good as the embedder model. If the embedder doesn't know the synonym/topic relation, dense won't find it. Also vulnerable to the old bug where very long unrelated titles accidentally scored high due to matching common descriptive words (fixed in `_match_titles` for MCP). |
+| **BM25** | `_bm25_leg()` | Builds an inverted index from chunk text (see BM25 infrastructure notes below). Scores each chunk for the query tokens, sums BM25 scores per title. Matches individual word occurrences anywhere in chunk content regardless of proximity. | Broad lexical coverage: any book whose chunks share vocabulary with the query. Works well when the topic has recognizable keywords scattered across many chunks. | Synonyms/stemming gaps (the tokenizer lowercases but does not stem), misspellings in OCR, and any semantic concept not expressible as shared surface-level words. |
+
+### Why three legs? (and why fusion matters)
+
+No single approach is sufficient:
+- Lexical gives precision (no false positives) but blind recall.
+- Dense gives broad semantic recall but can be noisy.
+- BM25 catches chunk-level keyword hits but misses cross-chapter thematic concepts.
+
+RRF solves the combination problem elegantly: a book appearing near the top of
+multiple legs gets exponentially more weight than one that only appears once.
+With `k=60`, rank-1 contributes `1/61 ≈ 0.0164`; if a book is rank-1 on two legs,
+it gets `0.0328` — double the raw score of a solo leader.
+
+```
+Example: "natural horsemanship" → top 8 titles (real output):
+
+Title                                              Lex  Dns  BM2  Fused_pos
+A METHOD OF HORSEMANSHIP - F. BAUCHER               1    4    1    #1  (L+B strong signal)
+Nature in Horsemanship                              2    1    7    #2  (D strongest, L helps)
+True Horsemanship Through Feel                      —    3    8    #3  (D+B fuse, no lexical title overlap)
+Riding and Horsemanship                             —    —    6    #4  (BM25-only, chunks have "horse"+"riding")
+The Art of Horsemanship                             —    —    5    #5  (same pattern: BM25 carries)
+Native American Horse...                            4    2    —    #6  (L+D fuse)
+Hints on Horsemanship                               2    —    —    #7  (lexical alone, short title tag boost)
+Horse, Follow Closely...                            3    —    —    #8  (lexical alone)
+```
+
+Notice how **true horsemanship titles dominate the fused result** even when they
+only appear on one leg. A book that scores poorly or not-at-all on some legs still
+survives if it ranks reasonably on another — fusion prevents any single weak leg
+from eliminating a genuinely relevant title.
+
+### Debugging catalog rankings
+
+You can inspect exactly which leg contributes to each ranking without modifying
+code. Run from the deployment directory:
+
+```bash
+python scripts/catalog.py find "<topic>" --set <collection> --debug
+```
+
+The `--debug` flag prints:
+1. Per-leg top-N lists with visual bar indicators
+2. A **"Title coverage"** table showing `[L]`, `[D]`, `[B]` or combinations like
+   `[LDB]` for each ranked title plus its final fused position
+3. The standard rendered Markdown table at the bottom
+
+This is essential when troubleshooting questions like:
+- *"Why did Karen Pryor's book show up?"* — was it the dense leg pulling it in
+  through semantic association with horse-training content?
+- *"Why didn't 'Complete Training of Horse and Rider' appear?"* — check if dense
+  picked it up; if not, the embedder may not have strongly linked it to the topic
+  (could improve with better embedding data or a re-embedded DB later).
+- *"Is BM25 dragging in therapy books that aren't really about horsemanship?"* —
+  the coverage table shows `[B]`-only titles, letting you see BM25 noise sources.
+
+For programmatic access, `find_books(topic, set_name, cfg, debug=True)` returns
+a `(books_list, leg_breakdown_dict)` tuple instead of just the list.
+
+### Cross-encoder reranker status: OFF for catalog
+
+The cross-encoder reranker (`cross-encoder/ms-marco-MiniLM-L-6-v2`) is **not used
+in catalog ranking**. It only activates in the RAG retrieval pipeline used by
+`/api/chat` (agent.py `retrieve_rag()`, lines 959-961), *after* the three-legged
+fuse and before diversification.
+
+Reasoning: the reranker would add significant latency to every catalog query
+(especially the "list books" flow that users browse casually). Since catalog uses
+a smaller pooling size and already fuses three independent signals, the marginal
+quality gain from reranking isn't worth the added cost on the mid-range hardware
+tier. The reranker remains available in config:
+
+```json
+{
+  "rerank_model": "cross-encoder/ms-marco-MiniLM-L-6-v2",
+  "rerank_enabled": true
+}
+```
+
+It fires exclusively in the chat retrieval path where users are waiting for an
+answer (latency is expected) and the reranker's fine-grained query-chunk scoring
+provides higher value for answer accuracy.
+
+### Three-tower hardware strategy
+
+Future deployments should pick one of these tiers based on available resources:
+
+| Tier | Embedder | Reranker | Pool sizes | Typical latency | Cost |
+|------|----------|----------|------------|-----------------|------|
+| **Low-end** | multilingual-e5-small (384-dim, CPU) | disabled | `catalog_semantic_pool: 200` | ~1-2s catalog, ~3-5s chat | Raspberry Pi / Jetson Nano |
+| **Mid-range (current)** | multilingual-e5-small (384-dim, CPU) | enabled for chat only | `catalog_semantic_pool: 500` | ~2-4s catalog, ~5-10s chat | Single GPU card / modern laptop |
+| **Serious** | Larger embedder (e.g. e5-mistral-7b or bge-large) + optional reranker in catalog too | enabled everywhere | `catalog_semantic_pool: 1000+` | ~3-8s catalog, ~8-20s chat | Dedicated GPU server |
+
+Key knobs:
+- `embed_model` in `config.json` — swap for a bigger/smaller model (requires
+  **re-embedding the entire database** — a one-time offline operation via ingest).
+- `rerank_enabled` — flip off for low-end, keep on for chat on mid-range, consider
+  adding `catalog_rerank: true` for serious tier.
+- `catalog_semantic_pool` — larger pools give dense leg more candidates to choose
+  from, improving recall of semantically-relevant-but-not-obvious books. Diminishing
+  returns past ~1000 on current datasets (~170k chunks).
+- `chat_mode: "agentic"` vs `"single"` — agentic mode retries retrieval when
+  low-relevance guard triggers, useful for precise factual queries but adds latency.
+
+The current deployment is mid-range: embedder loads once per process (cached via
+`_EMBEDDER_CACHE` in agent.py after the recent fix), BM25 fully rebuilt to 100%
+coverage, catalog uses default 500-pool. A future major release could swap the
+embedder and re-embed — but none of the current changes require it. Everything
+works identically with whatever embedder is configured.
 
 ---
 

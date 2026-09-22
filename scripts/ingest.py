@@ -345,6 +345,31 @@ class Manifest:
             (set_name,),
         )
 
+    def replace_bm25(self, doc_rows: list, set_name: str = ""):
+        """Bulk-replace a set's entire BM25 posting table, then rebuild df.
+
+        ``doc_rows`` is a list of ``(doc_id, tokens)`` pairs covering every
+        chunk of the set. Clears the set's rows first so a stale/incomplete
+        posting list is fully replaced rather than merged, and recomputes
+        ``bm25_df`` in one pass (avoids the per-token df subqueries that
+        ``write_bm25_tokens`` does, which are too slow for a full re-tokenize).
+        """
+        self.conn.execute(
+            "DELETE FROM bm25_tokens WHERE set_name = ?", (set_name,)
+        )
+        from collections import Counter
+        rows = []
+        for doc_id, tokens in doc_rows:
+            for tok, tf in Counter(tokens).items():
+                rows.append((doc_id, tok, tf, set_name))
+        self.conn.executemany(
+            "INSERT OR REPLACE INTO bm25_tokens (doc_id, token, tf, set_name) "
+            "VALUES (?, ?, ?, ?)",
+            rows,
+        )
+        self.rebuild_bm25_df(set_name)
+        self.conn.commit()
+
     def remove_parents(self, rel_path: str, set_name: str = ""):
         self.conn.execute(
             "DELETE FROM parents WHERE source = ? AND set_name = ?",
@@ -1376,6 +1401,66 @@ def _handle_stop(signum, frame):
     raise SystemExit(0)
 
 
+def _rebuild_bm25(set_name: str, cfg: dict):
+    """Rebuild the persistent BM25 posting tables for a set from ALL of its
+    Chroma chunks. Used to repair an incomplete/legacy posting list (e.g. a
+    library ingested before BM25 persistence, or re-indexed only incrementally),
+    which otherwise yields a sparse lexical leg at query time."""
+    batch = 5000
+    rag_root_ = rag_root()
+    index_dir = rag_root_ / "index"
+    db_path = rag_root_ / "manifest.db"
+    if not db_path.exists():
+        console.print(f"[red]No manifest at {db_path}[/red]")
+        sys.exit(1)
+    if not (index_dir / "chroma.sqlite3").exists():
+        console.print(f"[red]No Chroma index at {index_dir}[/red]")
+        sys.exit(1)
+
+    console.print(f"[dim]Connecting to collection '{set_name}'...[/dim]")
+    client = chromadb.PersistentClient(path=str(index_dir))
+    names = [c.name for c in client.list_collections()]
+    if set_name not in names:
+        console.print(f"[red]Collection '{set_name}' not found. "
+                      f"Available: {', '.join(names) or '(none)'}[/red]")
+        sys.exit(1)
+    collection = client.get_collection(set_name)
+    total = collection.count()
+
+    manifest = Manifest(db_path)
+    # Record the pre-rebuild coverage so the operator can see the improvement.
+    pre = sqlite3.connect(str(db_path)).execute(
+        "SELECT COUNT(DISTINCT doc_id) FROM bm25_tokens WHERE set_name = ?",
+        (set_name,),
+    ).fetchone()[0]
+    doc_rows = []
+    offset = 0
+    while True:
+        res = collection.get(limit=batch, offset=offset, include=["documents"])
+        ids = res.get("ids") or []
+        docs = res.get("documents") or []
+        if not ids:
+            break
+        for cid, txt in zip(ids, docs):
+            toks = tokenize(txt or "")
+            if toks:
+                doc_rows.append((cid, toks))
+        offset += len(ids)
+        if len(ids) < batch:
+            break
+        console.print(f"[dim]  scanned {offset}/{total} chunks...[/dim]")
+
+    console.print(f"[dim]Writing {len(doc_rows)} doc postings to manifest.db...[/dim]")
+    manifest.replace_bm25(doc_rows, set_name)
+    n_report = sqlite3.connect(str(db_path)).execute(
+        "SELECT COUNT(DISTINCT doc_id) FROM bm25_tokens WHERE set_name = ?",
+        (set_name,),
+    ).fetchone()[0]
+    console.print(f"[green]BM25 rebuilt for '{set_name}': {n_report}/{total} chunks "
+                  f"indexed (was {pre}).[/green]")
+    return n_report
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="Ingest documents into RAG index")
@@ -1383,7 +1468,16 @@ def main():
     parser.add_argument("--set", default="veracrypt1", help="Collection/set name")
     parser.add_argument("--force", action="store_true", help="Reprocess all files")
     parser.add_argument("--only", help="Only process files matching this path substring")
+    parser.add_argument("--rebuild-bm25", action="store_true",
+                        help="Rebuild the persistent BM25 posting tables for the "
+                             "given --set from all its Chroma chunks (repairs a "
+                             "stale/incomplete lexical index); no re-embedding.")
     args = parser.parse_args()
+
+    if args.rebuild_bm25:
+        cfg = load_config()
+        _rebuild_bm25(args.set, cfg)
+        return
 
     signal.signal(signal.SIGINT, _handle_stop)
     signal.signal(signal.SIGTERM, _handle_stop)

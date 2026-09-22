@@ -89,6 +89,21 @@ Re-running is incremental — new files are added, existing ones are skipped.
 **Chat** — Ask questions. Each answer shows its sources with similarity scores and
 fiction/non-fiction tags. If all your sources are fiction, you get a visible warning.
 
+### Browsing, summaries & quizzes
+
+Beyond plain question-answering, the assistant understands a few intent-shifted
+requests that bypass the passage-retrieval cap:
+
+- **"list books about X" / "how many books are in my library"** — a deterministic
+  catalog mode renders a Markdown table of matching titles (no LLM involved). If
+  more than `catalog_clarify_threshold` titles match, it shows the first 20 and
+  answers **"all"** to expand to the full list.
+- **"summarize [Book]"** — with `summary_strategy: "map_reduce"`, naming a work
+  triggers a deep, book-wide summary (map sections → one streamed reduce call)
+  instead of a single shallow pass.
+- **"quiz me on [topic/work]"** — generates structured practice questions with
+  collapsible answers and per-question source citations.
+
 ## Configuration
 
 All settings live in `config.json`:
@@ -105,6 +120,12 @@ All settings live in `config.json`:
 | `retrieval_top_k` | `10` | Chunks retrieved per question |
 | `ocr_enabled` | `false` | OCR scanned PDFs during ingest |
 | `sets` | — | Named library directories (see below) |
+
+The catalog, summary, and quiz behaviors are tuned by additional keys
+(`catalog_enabled`, `catalog_clarify_threshold`, `catalog_max_rows`,
+`catalog_semantic_pool`, `summary_strategy`, `summary_max_chunks`,
+`summary_context_budget`, `quiz_default_count`, `chat_mode`, `show_thinking`,
+`max_tokens_*`) — see [**tuning.md**](tuning.md) for how they interact.
 
 > **Tuning & portability:** the defaults work well out of the box, but several
 > settings are dataset- or hardware-dependent. See [**tuning.md**](tuning.md) for
@@ -131,8 +152,9 @@ with local servers (LM Studio, llama.cpp, vLLM) or cloud APIs.
 ## MCP server (for LM Studio)
 
 If you prefer chatting in LM Studio's GUI, the library can be exposed as an MCP
-server. The model calls `search_library`, `summarize_work`, or `list_collections`
-tools while answering questions, grounding its responses in your actual books.
+server. The model calls `search_library`, `summarize_work`, `list_collections`,
+`list_books`, or `make_quiz` tools while answering questions, grounding its
+responses in your actual books.
 
 ```bash
 ./run_mcp.sh              # stdio transport (for local LM Studio)

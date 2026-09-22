@@ -19,6 +19,7 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
 os.environ["CUDA_VISIBLE_DEVICES"] = ""  # Force CPU for embeddings
+os.environ.setdefault("HF_HUB_OFFLINE", "1")  # Skip HuggingFace remote checks; models cached from first-run
 
 from flask import Flask, jsonify, request, send_from_directory, Response
 from flask_cors import CORS
@@ -32,6 +33,8 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 import chat_store
 import ingest as ING
 import scan as SCAN
+import catalog as CAT
+import study as STUDY
 
 app = Flask(__name__, static_folder=str(RAG_ROOT / "web"), static_url_path="/web")
 CORS(app)
@@ -167,7 +170,25 @@ def default_cfg():
         "llm_api_key": None,
         "llm_temperature": 0.3,
         "llm_max_tokens": 2048,
+        "max_tokens_default": 2048,
+        "max_tokens_quiz": 4096,
+        "max_tokens_summary": 4096,
+        "chat_mode": "agentic",
+        "show_thinking": False,
         "setup_complete": False,
+        "context_word_budget": 3000,
+        "chunk_word_cap": 300,
+        "history_char_budget": 10000,
+        "history_msg_limit": 12,
+        "catalog_enabled": True,
+        "catalog_clarify_threshold": 20,
+        "catalog_max_rows": 200,
+        "catalog_semantic_pool": 500,
+        "summary_strategy": "map_reduce",
+        "summary_max_chunks": 40,
+        "summary_context_budget": 8000,
+        "quiz_default_count": 10,
+        "quiz_output_format": "markdown",
         "retrieval_top_k": 10,
         "relevance_threshold": 0.80,
         "max_retrieval_hops": 2,
@@ -199,9 +220,43 @@ def detect_source_dirs():
     return sorted(set(candidates))
 
 
+def _llm_native_states(cfg) -> dict | None:
+    """Read per-model load state from LM Studio's native API.
+
+    LM Studio JIT-loads models on the first request, so probing a model (even
+    with ``max_tokens=5``) can trigger a full load. The native
+    ``/api/v0/models`` endpoint reports state without touching any model. It is
+    fail-soft: returns ``None`` when the endpoint is absent (remote/cloud
+    providers or older servers), so callers can distinguish "unknown" from
+    "known not-loaded".
+    """
+    import urllib.request
+    base = str(cfg.get("llm_base_url", "")).rstrip("/")
+    if base.endswith("/v1"):
+        base = base[:-3]
+    url = base + "/api/v0/models"
+    headers = {}
+    api_key = cfg.get("llm_api_key")
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=2) as r:
+            data = json.loads(r.read().decode())
+    except Exception:
+        return None
+    states = {}
+    for m in data.get("data", []):
+        mid = m.get("id")
+        if not mid:
+            continue
+        states[mid] = m.get("state") or ("loaded" if m.get("loaded") else "not-loaded")
+    return states
+
+
 def check_llm():
     """Check if the configured LLM API (LM Studio / llama.cpp / cloud) is
-    reachable and list its models."""
+    reachable and list its models, plus (best-effort) which are loaded."""
     cfg = load_cfg()
     import urllib.request
     url = cfg["llm_base_url"].rstrip("/") + "/models"
@@ -214,9 +269,19 @@ def check_llm():
         with urllib.request.urlopen(req, timeout=3) as r:
             data = json.loads(r.read().decode())
         models = [m.get("id", "") for m in data.get("data", [])]
-        return {"online": True, "models": models, "url": cfg["llm_base_url"]}
+        result = {"online": True, "models": models, "url": cfg["llm_base_url"]}
     except Exception as e:
-        return {"online": False, "models": [], "error": str(e), "url": cfg["llm_base_url"]}
+        return {"online": False, "models": [], "error": str(e),
+                "url": cfg["llm_base_url"],
+                "model_states": {}, "loaded": None, "native": False}
+    states = _llm_native_states(cfg)
+    result["model_states"] = states or {}
+    result["native"] = states is not None
+    if states is None:
+        result["loaded"] = None
+    else:
+        result["loaded"] = states.get(cfg.get("llm_model", "default")) == "loaded"
+    return result
 
 
 # Backward-compatible alias used in a few places.
@@ -655,6 +720,14 @@ def api_config_set():
         "embed_model", "embed_device", "embed_dim", "chunk_tokens", "chunk_overlap",
         "chunking_strategy", "parent_tokens",
         "llm_base_url", "llm_model", "llm_api_key", "llm_temperature", "llm_max_tokens",
+        "max_tokens_default", "max_tokens_quiz", "max_tokens_summary",
+        "chat_mode", "show_thinking",
+        "context_word_budget", "chunk_word_cap",
+        "history_char_budget", "history_msg_limit",
+        "catalog_enabled", "catalog_clarify_threshold", "catalog_max_rows",
+        "catalog_semantic_pool",
+        "summary_strategy", "summary_max_chunks", "summary_context_budget",
+        "quiz_default_count", "quiz_output_format",
         "retrieval_top_k", "relevance_threshold", "max_retrieval_hops",
         "retrieval_hops_driver",
         "rerank_model", "rerank_enabled",
@@ -873,6 +946,38 @@ SELFHOST_EST_MB = 1100  # ~1.1 GB
 @app.route("/api/llm/status")
 def api_llm_status():
     return jsonify(check_llm())
+
+
+# Explicit probe cache (Setup "Test model" button). NEVER triggered on a status
+# poll: a max_tokens=5 completion can JIT-load an unloaded model (slow, VRAM
+# churn), so probing is always user-initiated and cached for 30s.
+_LLM_PROBE_CACHE = {"at": 0.0, "model": None, "result": None}
+_LLM_PROBE_TTL = 30
+
+
+@app.route("/api/llm/test", methods=["POST"])
+def api_llm_test():
+    cfg = load_cfg()
+    model = cfg.get("llm_model", "default")
+    now = time.time()
+    c = _LLM_PROBE_CACHE
+    if c["result"] is not None and c["model"] == model \
+            and (now - c["at"]) < _LLM_PROBE_TTL:
+        return jsonify(c["result"])
+    result = {"ok": False, "loaded": False, "model": model, "error": None}
+    try:
+        client = get_chat_client()
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": "ping"}],
+            max_tokens=5,
+        )
+        text = (resp.choices[0].message.content or "").strip()
+        result.update(ok=True, loaded=True, sample=text[:80])
+    except Exception as e:
+        result["error"] = str(e)
+    _LLM_PROBE_CACHE.update(at=now, model=model, result=result)
+    return jsonify(result)
 
 
 @app.route("/api/llm/apply", methods=["POST"])
@@ -1193,6 +1298,311 @@ def default_set_name():
     return "veracrypt1"
 
 
+# ─── Catalog / list mode ─────────────────────────────────────────────────────
+#
+# Deterministic, LLM-free path for "list books about X" style requests. It
+# enumerates manifest.db titles and renders a Markdown table in Python, so the
+# answer is complete and reliable instead of being capped by passage retrieval.
+
+CATALOG_FIRST_PAGE = 20
+_PENDING_CATALOG = {}          # conv_id -> pending dict (fast-path fallback)
+_PENDING_LOCK = threading.Lock()
+
+_ALL_FOLLOWUP_RE = re.compile(
+    r"^\s*(?:show\s+|list\s+|give\s+me\s+|see\s+)?"
+    r"(?:all(?:\s+of\s+them)?|everything|the\s+(?:full|complete|entire)\s+"
+    r"(?:list|thing)|full\s+list|complete\s+list|yes,?\s+please|yes|yep|sure|ok(?:ay)?)"
+    r"\s*[.!]?\s*$", re.IGNORECASE)
+
+_ALL_WORDS_RE = re.compile(
+    r"\b(all|every|full|complete|entire|everything)\b", re.IGNORECASE)
+
+
+def _last_assistant_meta(conv_id):
+    conv = chat_store.get_conversation(conv_id)
+    if not conv:
+        return None
+    for m in reversed(conv.get("messages", [])):
+        if m.get("role") == "assistant":
+            return m.get("meta") or {}
+    return None
+
+
+def _pending_followup(conv_id, query):
+    """Resolve an "all"/"show all" follow-up against a persisted clarification."""
+    if not conv_id or not _ALL_FOLLOWUP_RE.match(query or ""):
+        return None
+    pending = chat_store.get_pending_catalog(conv_id)
+    if not pending:
+        with _PENDING_LOCK:
+            pending = _PENDING_CATALOG.get(conv_id)
+    if not pending:
+        return None
+    meta = _last_assistant_meta(conv_id) or {}
+    if not meta.get("clarify"):
+        return None
+    return pending
+
+
+def _clear_pending_catalog(conv_id):
+    if not conv_id:
+        return
+    chat_store.set_pending_catalog(conv_id, None)
+    with _PENDING_LOCK:
+        _PENDING_CATALOG.pop(conv_id, None)
+
+
+def _set_pending_catalog(conv_id, pending):
+    if not conv_id:
+        return
+    chat_store.set_pending_catalog(conv_id, pending)
+    with _PENDING_LOCK:
+        _PENDING_CATALOG[conv_id] = pending
+
+
+def _catalog_prose(books, topic, cfg):
+    """Optional short prose summary of the catalog result (best-effort)."""
+    titles = ["- " + b.get("title", "") for b in books[:30]]
+    ctx = "\n".join(titles)
+    prompt = (f"The user asked about books in their library"
+              + (f" on the topic '{topic}'" if topic else "")
+              + ". In 2-4 sentences, describe what these books collectively "
+                "cover and note any notable clusters. Do not invent titles "
+                "beyond this list.\n\nTitles:\n" + ctx)
+    try:
+        client = get_chat_client()
+        resp = client.chat.completions.create(
+            model=cfg.get("llm_model", "default"),
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_tokens=int(cfg.get("max_tokens_summary", 4096) or 4096),
+        )
+        return (resp.choices[0].message.content or "").strip()
+    except Exception as e:
+        print(f"[catalog] prose summary failed: {e}", flush=True)
+        return ""
+
+
+def maybe_catalog(set_name, query, conv_id=None, filter_kind=None):
+    """Handle a catalog/list request deterministically.
+
+    Returns a result dict (with ``list_mode`` meta) or ``None`` when the query
+    is not a catalog request (caller should fall through to RAG).
+    """
+    cfg = load_cfg()
+    if not cfg.get("catalog_enabled", True):
+        return None
+
+    pending = _pending_followup(conv_id, query)
+    if pending is not None:
+        topic = pending.get("topic", "")
+        fk = pending.get("filter_kind")
+        explicit_all = True
+        from_pending = True
+    else:
+        if not CAT.is_list_intent(query):
+            return None
+        topic = CAT.extract_topic(query)
+        fk = CAT.extract_filter_kind(query) or filter_kind
+        explicit_all = bool(_ALL_WORDS_RE.search(query or ""))
+        from_pending = False
+
+    try:
+        collection = get_chat_collection(set_name)
+    except SystemExit:
+        return None
+    if collection.count() == 0:
+        return None
+
+    try:
+        books = CAT.find_books(topic, set_name, fk, cfg, collection=collection,
+                               embedder=get_chat_embedder())
+    except Exception as e:
+        print(f"[catalog] find_books failed: {e}", flush=True)
+        return None
+
+    label = "Library catalog"
+    if fk:
+        label += f" ({fk})"
+    if topic:
+        label += f" — books about **{topic}**"
+
+    if not books:
+        _clear_pending_catalog(conv_id)
+        msg = (f"### {label}\n\nNo books on **{topic}** were found in this "
+               "collection." if topic else
+               f"### {label}\n\nNo books were found in this collection.")
+        msg += ("\n\nTry a broader topic, a different keyword, or confirm the "
+                "set has been indexed (Ingest tab).")
+        return {"answer": msg, "sources": [], "list_mode": True, "count": 0,
+                "shown": 0, "truncated": False, "clarify": False,
+                "fiction_only": False, "low_relevance": False,
+                "relevance_reason": ""}
+
+    threshold = int(cfg.get("catalog_clarify_threshold", CATALOG_FIRST_PAGE)
+                    or CATALOG_FIRST_PAGE)
+    max_rows = int(cfg.get("catalog_max_rows", 200) or 200)
+    total = len(books)
+    clarify = False
+    if explicit_all or total <= threshold:
+        shown_books = books[:max_rows]
+        truncated = total > max_rows
+    else:
+        shown_books = books[:min(CATALOG_FIRST_PAGE, total)]
+        truncated = True
+        clarify = True
+
+    answer = f"### {label}\n\nFound **{total}** matching title(s).\n\n"
+    answer += CAT.render_table(shown_books)
+    if clarify:
+        answer += (f"\n\n**{total - len(shown_books)} more** — reply **all** "
+                   "for the full list.")
+    elif truncated:
+        answer += (f"\n\n_Showing the first {len(shown_books)} of {total} "
+                   f"(catalog_max_rows={max_rows})._")
+
+    if CAT.has_summary_keywords(query) and shown_books:
+        prose = _catalog_prose(shown_books, topic, cfg)
+        if prose:
+            answer += "\n\n" + prose
+
+    if clarify:
+        _set_pending_catalog(conv_id, {"topic": topic, "count": total,
+                                       "filter_kind": fk})
+    else:
+        _clear_pending_catalog(conv_id)
+
+    return {
+        "answer": answer, "sources": [], "list_mode": True, "count": total,
+        "shown": len(shown_books), "truncated": truncated or clarify,
+        "clarify": clarify, "fiction_only": False, "low_relevance": False,
+        "relevance_reason": "",
+    }
+
+
+def _turn_meta(result):
+    """Extract the extra meta keys persisted alongside an assistant turn."""
+    meta = {
+        "sources": result.get("sources", []),
+        "fiction_only": result.get("fiction_only", False),
+        "low_relevance": result.get("low_relevance", False),
+        "relevance_reason": result.get("relevance_reason", ""),
+    }
+    for k in ("list_mode", "count", "shown", "truncated", "clarify",
+              "quiz_mode", "quiz_count"):
+        if k in result:
+            meta[k] = result[k]
+    return meta
+
+
+# ─── Quiz / study mode ───────────────────────────────────────────────────────
+#
+# "Quiz me on X" / "make flashcards about Y" routes to structured question
+# generation (scripts/study.py) instead of the normal QA path. Quiz intent
+# takes priority over catalog/list intent. Material is retrieved by title
+# match when a work is named, or via the topic-based catalog search otherwise.
+
+# Keep the quiz-material context small enough to fit a tight-window model
+# (e.g. an 8k-token ~2B GGUF). Gathering many long chunks (24 × 300 words ≈
+# 11k tokens) makes every quiz generation blow the context window. These are
+# tuned so the prompt plus the generation template stays well under 8k even
+# with system/tools overhead.
+QUIZ_MATERIAL_CHUNKS = 10
+QUIZ_MATERIAL_WORDS = 140
+
+
+def maybe_quiz(set_name, query, conv_id=None, filter_kind=None):
+    """Handle a quiz/test request. Returns a result dict (with ``quiz_mode``)
+    or ``None`` when the query is not a quiz request."""
+    cfg = load_cfg()
+    if not CAT.is_quiz_intent(query):
+        return None
+
+    topic = CAT.extract_topic(query) or ""
+    count = CAT.extract_count(query, int(cfg.get("quiz_default_count", 10) or 10))
+    fk = CAT.extract_filter_kind(query) or filter_kind
+
+    try:
+        collection = get_chat_collection(set_name)
+    except SystemExit:
+        return None
+    if collection.count() == 0:
+        return None
+
+    import agent as _agent_mod
+    embedder = get_chat_embedder()
+    material = None
+    matched = _agent_mod._match_titles(query or topic, set_name)
+    if matched:
+        where = {"title": {"$in": matched}}
+        try:
+            hits = _agent_mod.retrieve(", ".join(matched), embedder, collection,
+                                       top_k=QUIZ_MATERIAL_CHUNKS, cfg=cfg,
+                                       where_extra=where)
+        except Exception:
+            hits = []
+        material = _agent_mod.build_context(hits[:QUIZ_MATERIAL_CHUNKS],
+                                            max_words=QUIZ_MATERIAL_WORDS)
+    else:
+        books = CAT.find_books(topic, set_name, fk, cfg,
+                               collection=collection, embedder=embedder)
+        titles = [b["title"] for b in books[:5]]
+        if titles:
+            where = {"title": {"$in": titles}}
+            try:
+                hits = _agent_mod.retrieve(topic, embedder, collection,
+                                           top_k=QUIZ_MATERIAL_CHUNKS, cfg=cfg,
+                                           where_extra=where)
+            except Exception:
+                hits = []
+            material = _agent_mod.build_context(hits[:QUIZ_MATERIAL_CHUNKS],
+                                                max_words=QUIZ_MATERIAL_WORDS)
+
+    if not material:
+        return {"answer": (f"### 🧠 Quiz\n\nNo material was found to quiz you "
+                           f"on{f' regarding **{topic}**' if topic else ''} in "
+                           "this collection."),
+                "sources": [], "quiz_mode": True, "quiz_count": 0,
+                "fiction_only": False, "low_relevance": False,
+                "relevance_reason": ""}
+
+    label = topic or ", ".join(matched) or "your library"
+    questions, err = STUDY.generate_quiz(label, material, cfg, get_chat_client())
+    if not questions:
+        body = (f"### 🧠 Quiz\n\nA quiz on **{label}** could not be generated."
+                + (f" ({err})" if err else ""))
+    else:
+        body = f"### 🧠 Quiz — {label}\n\n" + STUDY.render_markdown(questions)
+
+    return {"answer": body, "sources": [], "quiz_mode": True,
+            "quiz_count": len(questions),
+            "fiction_only": False, "low_relevance": False,
+            "relevance_reason": ""}
+
+
+# ─── Map-reduce deep summaries ───────────────────────────────────────────────
+#
+# When summary_strategy == "map_reduce" and the user names one or more works
+# (title_mode), we produce a deeper book-wide summary instead of stuffing a
+# capped excerpt pool into one prompt. The implementation lives in catalog.py
+# (map child chunks -> section parents spread across the book, batch map calls,
+# single reduce call). The reduce is one LLM call, so it streams token-by-token.
+# These thin wrappers keep the catalog/summary concerns out of the rag path.
+
+def map_reduce_summary(set_name, matched_titles, cfg, collection, embedder,
+                       client, progress_cb=None, stream_cb=None):
+    """Run the two-pass map-reduce summary (see catalog.py)."""
+    return CAT.map_reduce_summary(
+        set_name, matched_titles, cfg, collection, embedder, client,
+        progress_cb=progress_cb, stream_cb=stream_cb)
+
+
+def _single_shot_summary(set_name, matched_titles, cfg, collection, embedder,
+                         client):
+    return CAT._single_shot_summary(
+        set_name, matched_titles, cfg, collection, embedder, client)
+
+
 def _prepare_rag(set_name, query, top_k, filter_kind, history=None):
     """Run retrieval and build the upstream LLM message list.
 
@@ -1230,6 +1640,22 @@ def _prepare_rag(set_name, query, top_k, filter_kind, history=None):
     low_rel = rag_result["low_relevance"]
     low_reason = rag_result["relevance_reason"]
     sources = rag_result["sources"]
+
+    # Deep map-reduce summaries for named works (non-streaming callers).
+    if title_mode and (cfg.get("summary_strategy") or "single") == "map_reduce":
+        try:
+            answer = map_reduce_summary(
+                set_name, matched_titles, cfg, collection, embedder,
+                get_chat_client())
+            if not answer:
+                answer = "Unable to produce a summary for the named work(s)."
+            return {"answer": answer, "sources": sources,
+                    "fiction_only": fiction_only,
+                    "low_relevance": low_rel, "relevance_reason": low_reason,
+                    "deep_summary": True}
+        except Exception as e:
+            print(f"[chat] map-reduce summary failed ({e}); "
+                  "falling back to single-pass", flush=True)
 
     # Specific-work mode: the query named real library titles, so ask for a
     # per-work summary instead of a general answered-from-context question.
@@ -1341,8 +1767,10 @@ def run_rag_chat(set_name, query, top_k=None, filter_kind=None, history=None):
 
 
 # Keep the llm-chat history bounded so it stays well inside the context window.
+# Long tables/quizzes need headroom so follow-ups like "explain answer 3" work.
 HISTORY_MSG_LIMIT = 12
-HISTORY_CHAR_BUDGET = 6000
+HISTORY_CHAR_BUDGET = 10000
+HISTORY_MSG_CHAR_CAP = 2500
 
 
 def _conversation_history(conv_id) -> list[dict]:
@@ -1352,14 +1780,17 @@ def _conversation_history(conv_id) -> list[dict]:
     conv = chat_store.get_conversation(conv_id)
     if not conv:
         return []
+    cfg = load_cfg()
+    msg_limit = int(cfg.get("history_msg_limit", HISTORY_MSG_LIMIT) or HISTORY_MSG_LIMIT)
+    char_budget = int(cfg.get("history_char_budget", HISTORY_CHAR_BUDGET) or HISTORY_CHAR_BUDGET)
     msgs = [m for m in conv.get("messages", [])
             if m.get("role") in ("user", "assistant") and m.get("content")]
-    msgs = msgs[-HISTORY_MSG_LIMIT:]
+    msgs = msgs[-msg_limit:]
     history, used = [], 0
     for m in msgs:
-        content = (m.get("content") or "")[:1200]
+        content = (m.get("content") or "")[:HISTORY_MSG_CHAR_CAP]
         used += len(content) + 40
-        if used > HISTORY_CHAR_BUDGET:
+        if used > char_budget:
             break
         history.append({"role": m["role"], "content": content})
     return history
@@ -1375,16 +1806,27 @@ def api_chat():
     top_k = int(data.get("top_k", load_cfg().get("retrieval_top_k", 10)))
     filter_kind = data.get("filter_kind")
     conv_id = data.get("conversation_id")
+    quiz = maybe_quiz(set_name, query, conv_id, filter_kind)
+    if quiz is not None:
+        if conv_id and "error" not in quiz:
+            chat_store.add_message(conv_id, "user", query)
+            chat_store.add_message(conv_id, "assistant", quiz.get("answer", ""),
+                                   _turn_meta(quiz))
+        return jsonify(quiz), 200
+    cat = maybe_catalog(set_name, query, conv_id, filter_kind)
+    if cat is not None:
+        if conv_id and "error" not in cat:
+            chat_store.add_message(conv_id, "user", query)
+            chat_store.add_message(conv_id, "assistant", cat.get("answer", ""),
+                                   _turn_meta(cat))
+        return jsonify(cat), 200
     history = _conversation_history(conv_id)
     result, code = run_rag_chat(set_name, query, top_k, filter_kind, history)
 
     if conv_id and "error" not in result:
         chat_store.add_message(conv_id, "user", query)
         chat_store.add_message(conv_id, "assistant", result.get("answer", ""),
-                               {"sources": result.get("sources", []),
-                                "fiction_only": result.get("fiction_only", False),
-                                "low_relevance": result.get("low_relevance", False),
-                                "relevance_reason": result.get("relevance_reason", "")})
+                               _turn_meta(result))
     return jsonify(result), code
 
 
@@ -1394,19 +1836,18 @@ def _persist_chat(conv_id, query, result):
         return
     chat_store.add_message(conv_id, "user", query)
     chat_store.add_message(conv_id, "assistant", result.get("answer", ""),
-                           {"sources": result.get("sources", []),
-                            "fiction_only": result.get("fiction_only", False),
-                            "low_relevance": result.get("low_relevance", False),
-                            "relevance_reason": result.get("relevance_reason", "")})
+                           _turn_meta(result))
 
 
 @app.route("/api/chat/stream", methods=["POST"])
 def api_chat_stream():
-    """Streaming RAG chat for the web UI. Single-shot (no agentic loop).
+    """Streaming RAG chat for the web UI.
 
     SSE events: ``delta`` (raw text), ``done`` (final JSON incl. sources/meta),
-    ``error`` (JSON with an ``error`` string). Aborting mid-stream skips
-    persistence.
+    ``progress`` (optional heartbeat), ``error`` (JSON with an ``error``
+    string). Aborting mid-stream skips persistence. Under ``chat_mode:
+    "agentic"`` this runs the streaming agentic loop (progress heartbeats +
+    streamed final answer); otherwise it stays single-shot.
     """
     data = request.get_json(force=True) or {}
     set_name = data.get("set", "veracrypt1")
@@ -1428,11 +1869,153 @@ def api_chat_stream():
 def _stream_sse(set_name, query, top_k, filter_kind, history, conv_id):
     import json as _json
     cfg = load_cfg()
+
+    quiz = maybe_quiz(set_name, query, conv_id, filter_kind)
+    if quiz is not None:
+        text = quiz.get("answer", "")
+        yield "event: delta\ndata: " + _json.dumps(text) + "\n\n"
+        yield "event: done\ndata: " + _json.dumps(quiz) + "\n\n"
+        _persist_chat(conv_id, query, quiz)
+        return
+
+    cat = maybe_catalog(set_name, query, conv_id, filter_kind)
+    if cat is not None:
+        text = cat.get("answer", "")
+        yield "event: delta\ndata: " + _json.dumps(text) + "\n\n"
+        yield "event: done\ndata: " + _json.dumps(cat) + "\n\n"
+        _persist_chat(conv_id, query, cat)
+        return
+
+    # Streaming map-reduce deep summaries: show progress during map batches,
+    # then stream the single reduce call token-by-token. The map/reduce work
+    # runs in a worker thread that pushes progress/delta events into a queue;
+    # this generator drains the queue and yields them as live SSE events.
+    if (cfg.get("summary_strategy") or "single") == "map_reduce":
+        collection = None
+        _matched = []
+        try:
+            collection = get_chat_collection(set_name)
+            import agent as _agent_mod
+            _matched = _agent_mod._match_titles(query, set_name)
+        except SystemExit:
+            pass
+        if _matched and collection is not None:
+            import queue as _queue
+            evq = _queue.Queue()
+
+            def _worker():
+                try:
+                    def _progress_cb(msg):
+                        evq.put(("progress", {"message": msg}))
+                    def _stream_cb(t):
+                        evq.put(("delta", t))
+                    map_reduce_summary(
+                        set_name, _matched, cfg, collection,
+                        get_chat_embedder(), get_chat_client(),
+                        progress_cb=_progress_cb, stream_cb=_stream_cb)
+                    evq.put(("done", True))
+                except Exception as e:
+                    print(f"[chat] streamed map-reduce failed ({e})", flush=True)
+                    evq.put(("error", str(e)))
+
+            t = threading.Thread(target=_worker, daemon=True)
+            t.start()
+            parts = []
+            while True:
+                kind, data = evq.get()
+                if kind == "progress":
+                    yield "event: progress\ndata: " + _json.dumps(
+                        {"message": data["message"]}) + "\n\n"
+                elif kind == "delta":
+                    parts.append(data)
+                    yield "event: delta\ndata: " + _json.dumps(data) + "\n\n"
+                elif kind == "error":
+                    yield "event: error\ndata: " + _json.dumps(
+                        {"error": data}) + "\n\n"
+                    return
+                elif kind == "done":
+                    break
+            text = "".join(parts).strip()
+            if not text:
+                yield "event: error\ndata: " + _json.dumps(
+                    {"error": "LLM returned no usable summary."}) + "\n\n"
+                return
+            done = {"answer": text, "sources": [],
+                    "fiction_only": False, "low_relevance": False,
+                    "relevance_reason": "", "deep_summary": True}
+            yield "event: done\ndata: " + _json.dumps(done) + "\n\n"
+            _persist_chat(conv_id, query, done)
+            return
+
+    # Streaming agentic loop: when enabled and chat_mode != "single", run the
+    # tool loop in a worker thread. Progress heartbeats fire during tool
+    # resolution; the final answer is regenerated as one streamed completion
+    # whose deltas flow back as SSE. Falls back to the single-shot path below.
+    if cfg.get("agentic_enabled", True) and \
+            (cfg.get("chat_mode") or "agentic") != "single":
+        import queue as _queue
+        evq = _queue.Queue()
+
+        def _agent_worker():
+            try:
+                agent_loop_mod = __import__("agent_loop",
+                                            fromlist=["run_agent_loop"])
+                result = agent_loop_mod.run_agent_loop(
+                    set_name, query, history, cfg, get_chat_client(),
+                    top_k=top_k, filter_kind=filter_kind,
+                    embedder=get_chat_embedder(),
+                    collection=get_chat_collection(set_name),
+                    reranker=get_chat_reranker(),
+                    progress_cb=lambda msg: evq.put(("progress", {"message": msg})),
+                    stream_cb=lambda t: evq.put(("delta", t)),
+                )
+                evq.put(("done", result))
+            except Exception as e:
+                print(f"[chat] streamed agentic loop failed ({e}); "
+                      "using single-shot", flush=True)
+                evq.put(("error", str(e)))
+
+        t = threading.Thread(target=_agent_worker, daemon=True)
+        t.start()
+        agent_parts = []
+        agent_done = None
+        while True:
+            kind, data = evq.get()
+            if kind == "progress":
+                yield "event: progress\ndata: " + _json.dumps(
+                    {"message": data["message"]}) + "\n\n"
+            elif kind == "delta":
+                agent_parts.append(data)
+                yield "event: delta\ndata: " + _json.dumps(data) + "\n\n"
+            elif kind == "error":
+                yield "event: error\ndata: " + _json.dumps(
+                    {"error": data}) + "\n\n"
+                return
+            elif kind == "done":
+                agent_done = data
+                break
+        answer = "".join(agent_parts).strip()
+        if not answer and agent_done and agent_done.get("answer"):
+            answer = agent_done["answer"].strip()
+        if agent_done and agent_done.get("error"):
+            yield "event: error\ndata: " + _json.dumps(
+                {"error": agent_done["error"]}) + "\n\n"
+            return
+        if not answer:
+            yield "event: error\ndata: " + _json.dumps(
+                {"error": "LLM returned no usable answer. Is the LLM API "
+                          "running?"}) + "\n\n"
+            return
+        done = {"answer": answer, "sources": agent_done.get("sources", []),
+                "fiction_only": agent_done.get("fiction_only", False),
+                "low_relevance": agent_done.get("low_relevance", False),
+                "relevance_reason": agent_done.get("relevance_reason", "")}
+        yield "event: done\ndata: " + _json.dumps(done) + "\n\n"
+        _persist_chat(conv_id, query, done)
+        return
+
     payload = _prepare_rag(set_name, query, top_k, filter_kind, history)
     if "error" in payload:
-        yield "event: error\ndata: " + _json.dumps({"error": payload["error"]}) + "\n\n"
-        return
-    if "answer" in payload and "messages" not in payload:
         text = payload["answer"]
         yield "event: delta\ndata: " + _json.dumps(text) + "\n\n"
         done = {"answer": text, "sources": payload.get("sources", []),
@@ -1526,6 +2109,13 @@ def api_openai_chat():
                      "Access-Control-Allow-Origin": "*"},
         )
 
+    quiz = maybe_quiz(set_name, query, None, filter_kind)
+    if quiz is not None:
+        return _openai_response(quiz["answer"], model, [])
+    cat = maybe_catalog(set_name, query, None, filter_kind)
+    if cat is not None:
+        return _openai_response(cat["answer"], model, [])
+
     payload = _prepare_rag(set_name, query, top_k, filter_kind, history)
     if "error" in payload:
         code = 503 if "paused" in payload["error"] else 404
@@ -1602,6 +2192,20 @@ def _openai_response(content, model, sources):
 
 def _sse_wrap(set_name, query, history, top_k, filter_kind, model):
     import json as _json
+    quiz = maybe_quiz(set_name, query, None, filter_kind)
+    if quiz is not None:
+        for word in quiz["answer"].split(" "):
+            yield "data: " + _json.dumps({
+                "choices": [{"delta": {"content": word + " "}}]}) + "\n\n"
+        yield "data: [DONE]\n\n"
+        return
+    cat = maybe_catalog(set_name, query, None, filter_kind)
+    if cat is not None:
+        for word in cat["answer"].split(" "):
+            yield "data: " + _json.dumps({
+                "choices": [{"delta": {"content": word + " "}}]}) + "\n\n"
+        yield "data: [DONE]\n\n"
+        return
     payload = _prepare_rag(set_name, query, top_k, filter_kind, history)
     if "error" in payload:
         yield "event: error\n"

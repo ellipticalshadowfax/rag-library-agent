@@ -22,8 +22,10 @@ path (see server.py).
 
 import json
 import re
+import time
 
 import agent
+import catalog
 
 QUERY_STOP = {
     "the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "with",
@@ -89,7 +91,9 @@ _TOOLS = [
         "function": {
             "name": "summarize_work",
             "description": "Retrieve excerpts of ONE named work (book) so you "
-                           "can summarize or discuss it specifically.",
+                           "can summarize or discuss it specifically. Set "
+                           "deep=true to run a full book-wide map-reduce "
+                           "summary instead of excerpt snippets.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -98,8 +102,60 @@ _TOOLS = [
                                              "of the book"},
                     "top_k": {"type": "integer", "description": "1-10",
                               "default": 8},
+                    "deep": {"type": "boolean",
+                             "description": "run a full map-reduce summary",
+                             "default": False},
                 },
                 "required": ["title"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_books",
+            "description": "Enumerate the user's library as a catalog table of "
+                           "titles (not passage excerpts). Use this for "
+                           "\"list/show/find/what books about ...\" requests. "
+                           "Returns Markdown rows with title, type, tags and "
+                           "path.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "topic": {"type": "string",
+                              "description": "topic to filter by; leave empty "
+                                             "to list the whole library",
+                              "default": ""},
+                    "filter_kind": {"type": ["string", "null"],
+                                    "description": "'fiction' or 'nonfiction'",
+                                    "default": None},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "make_quiz",
+            "description": "Generate a structured practice quiz (MCQ or "
+                           "short-answer) on a topic or a named work, with "
+                           "collapsible answers and source citations. Useful "
+                           "when the user asks to be quizzed or tested.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "topic": {"type": "string",
+                              "description": "topic or book title to quiz on"},
+                    "count": {"type": "integer",
+                              "description": "number of questions",
+                              "default": 10},
+                    "kind": {"type": "string",
+                             "description": "question type: 'mcq' or "
+                                            "'short_answer'",
+                             "default": "mcq"},
+                },
+                "required": ["topic"],
             },
         },
     },
@@ -192,6 +248,96 @@ def _tool_summarize_work(title, top_k, set_name, cfg, embedder, collection,
     return "\n".join(head) + _render_hits(hits)
 
 
+def _tool_list_books(topic, filter_kind, set_name, cfg, collection, embedder):
+    try:
+        books = catalog.find_books(topic, set_name, filter_kind, cfg,
+                                   collection=collection, embedder=embedder)
+    except Exception as e:
+        return f"(list_books failed: {e})"
+    if not books:
+        return (f"(No books matching{f' topic {topic!r}' if topic else ''} "
+                f"were found in set '{set_name}'.)")
+    head = (f"# Library catalog{f' — books about **{topic}**' if topic else ''}"
+            f"  (set: {set_name})\n\n"
+            f"Found {len(books)} matching title(s).\n\n")
+    rows = catalog.render_table(books[:50])
+    out = head + rows
+    if len(books) > 50:
+        out += f"\n\n_(truncated — {len(books) - 50} more not shown)_"
+    return out
+
+
+def _tool_summarize_work_deep(title, ctx):
+    """Deep map-reduce summary of a named work via catalog.map_reduce_summary."""
+    set_name = ctx["set_name"]
+    cfg = ctx["cfg"]
+    matched = agent._match_titles(title, set_name, limit=4)
+    if not matched:
+        return (f"(No work matching '{title}' was found in set '{set_name}'. "
+                "Try a different title or use search_library instead.)")
+    try:
+        summary = catalog.map_reduce_summary(
+            set_name, matched, cfg, ctx["collection"], ctx["embedder"],
+            ctx["client"])
+    except Exception as e:
+        return f"(deep summarize_work failed: {e})"
+    if not summary or "failed" in summary:
+        return summary or "(Deep summary produced no output.)"
+    return (f"# Deep summary of: {', '.join(matched[:4])}  (set: {set_name})\n\n"
+            + summary)
+
+
+def _tool_make_quiz(topic, count, ctx):
+    """Generate a quiz on a topic/work via study.generate_quiz."""
+    import study
+    set_name = ctx["set_name"]
+    cfg = ctx["cfg"]
+    topic = (topic or "").strip()
+    try:
+        count = max(1, min(int(count or 10), 50))
+    except (TypeError, ValueError):
+        count = int(cfg.get("quiz_default_count", 10) or 10)
+    import agent as agent_mod
+    embedder = ctx["embedder"]
+    collection = ctx["collection"]
+    # Keep the material small enough to fit a tight-window model (see the note
+    # on QUIZ_MATERIAL_* in server.py) — 24 × 300 words blows an 8k context.
+    MC, MW = 10, 140
+    material = None
+    matched = agent_mod._match_titles(topic, set_name)
+    if matched:
+        where = {"title": {"$in": matched}}
+        try:
+            hits = agent_mod.retrieve(", ".join(matched), embedder, collection,
+                                      top_k=MC, cfg=cfg, where_extra=where)
+        except Exception:
+            hits = []
+        material = agent_mod.build_context(hits[:MC], max_words=MW)
+    else:
+        books = catalog.find_books(topic, set_name, None, cfg,
+                                   collection=collection, embedder=embedder)
+        titles = [b["title"] for b in books[:5]]
+        if titles:
+            where = {"title": {"$in": titles}}
+            try:
+                hits = agent_mod.retrieve(topic, embedder, collection,
+                                          top_k=MC, cfg=cfg, where_extra=where)
+            except Exception:
+                hits = []
+            material = agent_mod.build_context(hits[:MC], max_words=MW)
+    if not material:
+        return (f"(No material found to quiz on{f' topic {topic!r}' if topic else ''}"
+                f" in set '{set_name}'.)")
+    saved = dict(cfg)
+    saved["quiz_default_count"] = count
+    questions, err = study.generate_quiz(topic or ", ".join(matched), material,
+                                         saved, ctx["client"])
+    if not questions:
+        return f"(Quiz generation failed: {err or 'no questions parsed'})"
+    head = f"# Quiz{f' — {topic}' if topic else ''}  (set: {set_name})\n\n"
+    return head + study.render_markdown(questions)
+
+
 def _exec_tool(name, args, ctx):
     """Dispatch a tool call (function-calling or ReAct) to its Python impl."""
     a = args or {}
@@ -203,9 +349,17 @@ def _exec_tool(name, args, ctx):
     if name == "get_section":
         return _tool_get_section(a.get("parent_id", ""), ctx["set_name"])
     if name == "summarize_work":
+        if a.get("deep"):
+            return _tool_summarize_work_deep(a.get("title", ""), ctx)
         return _tool_summarize_work(
             a.get("title", ""), a.get("top_k", 8), ctx["set_name"],
             ctx["cfg"], ctx["embedder"], ctx["collection"], ctx["reranker"])
+    if name == "list_books":
+        return _tool_list_books(
+            a.get("topic", "") or "", a.get("filter_kind"),
+            ctx["set_name"], ctx["cfg"], ctx["collection"], ctx["embedder"])
+    if name == "make_quiz":
+        return _tool_make_quiz(a.get("topic", ""), a.get("count", 10), ctx)
     return f"(Unknown tool: {name})"
 
 
@@ -281,11 +435,20 @@ def _parse_react_call(text: str):
 
 def run_agent_loop(set_name, query, history, cfg, client, max_steps=None,
                    top_k=None, filter_kind=None, embedder=None, collection=None,
-                   reranker=None, backend="auto", strategy=None):
+                   reranker=None, backend="auto", strategy=None,
+                   stream_cb=None, progress_cb=None):
     """Run the bounded agentic loop. Returns a result dict:
 
         {"answer", "sources", "fiction_only", "low_relevance",
          "relevance_reason", "steps", "strategy"}
+
+    When ``stream_cb`` is provided the final answer is produced by ONE extra
+    streamed chat completion: each delta (with ``reasoning_content`` filtered
+    out unless ``cfg.show_thinking`` is true) is passed to ``stream_cb``, and
+    ``stream_cb({"__done__": True, ...})`` fires at the end. ``progress_cb``,
+    when given, is called ~every 1.5s while the model is resolving tool
+    calls, to keep long-running SSE connections alive. With neither callback
+    the loop behaves exactly as before (blocking, non-streamed).
     """
     if top_k is None:
         top_k = int(cfg.get("retrieval_top_k", 10))
@@ -300,7 +463,8 @@ def run_agent_loop(set_name, query, history, cfg, client, max_steps=None,
         collection = agent.setup_chroma(set_name)
 
     ctx = {"set_name": set_name, "cfg": cfg, "embedder": embedder,
-           "collection": collection, "reranker": reranker, "backend": backend}
+           "collection": collection, "reranker": reranker, "backend": backend,
+           "client": client}
 
     messages, rag = _build_initial_messages(
         set_name, query, history, cfg, embedder, collection, reranker,
@@ -310,10 +474,69 @@ def run_agent_loop(set_name, query, history, cfg, client, max_steps=None,
     temperature = cfg.get("llm_temperature", 0.3)
     max_tokens = cfg.get("llm_max_tokens", 2048)
     steps = 0
+    streaming = stream_cb is not None
+
+    def _finish(answer, protocol, sources=None):
+        """Return the result dict. When streaming, regenerate the final answer
+        as one streamed completion appended to the accumulated messages."""
+        sources = rag["sources"] if sources is None else sources
+        if not streaming:
+            return {
+                "answer": answer, "sources": sources,
+                "fiction_only": rag["fiction_only"],
+                "low_relevance": rag["low_relevance"],
+                "relevance_reason": rag["relevance_reason"],
+                "steps": steps, "strategy": protocol,
+            }
+        # One extra streamed completion so the client sees live token deltas.
+        show_thinking = bool(cfg.get("show_thinking", False))
+        acc = []
+        try:
+            stream = client.chat.completions.create(
+                model=model, messages=messages,
+                temperature=temperature,
+                max_tokens=int(cfg.get("max_tokens_default",
+                                       max_tokens) or max_tokens),
+                stream=True,
+            )
+            for chunk in stream:
+                delta = chunk.choices[0].delta if chunk.choices else None
+                if delta is None:
+                    continue
+                text = getattr(delta, "content", None)
+                reason = getattr(delta, "reasoning_content", None)
+                if show_thinking and reason:
+                    text = (text or "") + reason
+                if text:
+                    acc.append(text)
+                    stream_cb(text)
+        except Exception as e:
+            err = f"\n\n(Streamed final answer failed: {e})"
+            acc.append(err)
+            stream_cb(err)
+        result = {
+            "answer": "".join(acc).strip(), "sources": sources,
+            "fiction_only": rag["fiction_only"],
+            "low_relevance": rag["low_relevance"],
+            "relevance_reason": rag["relevance_reason"],
+            "steps": steps, "strategy": protocol,
+        }
+        stream_cb(dict(result, **{"__done__": True}))
+        return result
 
     # Choose protocol. function-calling for "auto" or "function"; ReAct for
     # "react"; auto degrades to ReAct if a call with tools errors out.
     protocol = "react" if strategy == "react" else "function"
+    last_beat = time.monotonic()
+
+    def _heartbeat():
+        nonlocal last_beat
+        if not progress_cb:
+            return
+        now = time.monotonic()
+        if now - last_beat >= 1.5:
+            last_beat = now
+            progress_cb("Resolving...")
 
     while steps < max_steps:
         steps += 1
@@ -364,6 +587,7 @@ def run_agent_loop(set_name, query, history, cfg, client, max_steps=None,
                     except Exception:
                         args = {}
                     print(f"[agent_loop] tool call: {name}({args})")
+                    _heartbeat()
                     result = _exec_tool(name, args, ctx)
                     messages.append({
                         "role": "tool", "tool_call_id": tc.id,
@@ -375,13 +599,7 @@ def run_agent_loop(set_name, query, history, cfg, client, max_steps=None,
             answer = (msg.content or "").strip()
             if not answer and getattr(msg, "reasoning_content", None):
                 answer = msg.reasoning_content.strip()
-            return {
-                "answer": answer, "sources": rag["sources"],
-                "fiction_only": rag["fiction_only"],
-                "low_relevance": rag["low_relevance"],
-                "relevance_reason": rag["relevance_reason"],
-                "steps": steps, "strategy": "function",
-            }
+            return _finish(answer, "function")
 
         # ── ReAct protocol ──
         text = (msg.content or "").strip()
@@ -394,6 +612,7 @@ def run_agent_loop(set_name, query, history, cfg, client, max_steps=None,
             if stripped:
                 messages.append({"role": "assistant", "content": text})
             print(f"[agent_loop] react call: {name}({args})")
+            _heartbeat()
             result = _exec_tool(name, args, ctx)
             messages.append({
                 "role": "user",
@@ -404,20 +623,8 @@ def run_agent_loop(set_name, query, history, cfg, client, max_steps=None,
 
         # No call line -> final answer.
         answer = text or (getattr(msg, "reasoning_content", None) or "").strip()
-        return {
-            "answer": answer, "sources": rag["sources"],
-            "fiction_only": rag["fiction_only"],
-            "low_relevance": rag["low_relevance"],
-            "relevance_reason": rag["relevance_reason"],
-            "steps": steps, "strategy": "react",
-        }
+        return _finish(answer, "react")
 
     # Ran out of steps without a final answer.
     last = messages[-1].get("content", "") if messages else ""
-    return {
-        "answer": last, "sources": rag["sources"],
-        "fiction_only": rag["fiction_only"],
-        "low_relevance": rag["low_relevance"],
-        "relevance_reason": rag["relevance_reason"],
-        "steps": steps, "strategy": protocol,
-    }
+    return _finish(last, protocol)

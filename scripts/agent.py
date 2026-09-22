@@ -6,6 +6,47 @@ import json
 import os
 import re
 import sys
+
+# Force local-only model loading: skip HuggingFace remote checks on every
+# invocation. Models must be pre-cached (run.sh / manual first-load handles
+# this); subsequent startups load directly from disk cache (~4s vs ~30-60s).
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+
+# Process-level embedder cache — SentenceTransformer loading (~5s, ~600 MB)
+# must happen exactly once per Python process so we don't hit HF rate limits
+# or waste memory/time across CLI scripts and tool invocations.
+_EMBEDDER_CACHE = None  # type: dict | None
+
+
+def setup_embedder(cfg: dict):
+    """Lazy-load the embedding model, caching per-process for speed.
+
+    Falls back to config.json defaults if ``cfg`` lacks ``embed_model``,
+    which happens when catalog.py passes only ``{'catalog_semantic_pool': N}``.
+    """
+    global _EMBEDDER_CACHE
+    # Allow callers with minimal cfg to use config.json defaults
+    em = cfg.get("embed_model")
+    if em is None:
+        try:
+            defc = load_config()  # loads from config.json
+            em = defc.get("embed_model", "intfloat/multilingual-e5-small")
+        except Exception:
+            em = "intfloat/multilingual-e5-small"
+    edev = cfg.get("embed_device", "cpu")
+    model_key = f"{em}:{edev}"
+    if _EMBEDDER_CACHE is not None and _EMBEDDER_CACHE.get("_key") == model_key:
+        return _EMBEDDER_CACHE["_model"]
+    import torch
+    from sentence_transformers import SentenceTransformer
+    console.print(f"[dim]Loading embedder: {em}...[/dim]")
+    torch.set_num_threads(os.cpu_count() or 8)
+    model = SentenceTransformer(em, device=edev)
+    if hasattr(model, "prompts") and "query" not in model.prompts:
+        model.prompts.update({"passage": "passage: ", "query": "query: "})
+    console.print("[dim]Ready.[/dim]")
+    _EMBEDDER_CACHE = {"_key": model_key, "_model": model}
+    return model
 from pathlib import Path
 
 os.environ["CUDA_VISIBLE_DEVICES"] = ""  # Force CPU for embeddings
@@ -61,17 +102,6 @@ def setup_chroma(set_name: str):
         console.print(f"[red]Collection '{set_name}' not found. Run ingest.py first.[/red]")
         sys.exit(1)
 
-
-def setup_embedder(cfg: dict):
-    import torch
-    from sentence_transformers import SentenceTransformer
-    console.print(f"[dim]Loading embedder: {cfg['embed_model']}...[/dim]")
-    torch.set_num_threads(os.cpu_count() or 8)
-    model = SentenceTransformer(cfg["embed_model"], device=cfg.get("embed_device", "cpu"))
-    if hasattr(model, "prompts") and "query" not in model.prompts:
-        model.prompts.update({"passage": "passage: ", "query": "query: "})
-    console.print("[dim]Ready.[/dim]")
-    return model
 
 
 # Max chunks kept per distinct title during retrieval diversification, so one
@@ -605,6 +635,29 @@ FUSE_RRF_K = 60
 _bm25_cache = {}  # set_name -> {"bm25": BM25Okapi, "ids": [chunk ids], "df": {token: doc_freq}}
 
 
+# Minimum fraction of the collection's chunks a persisted BM25 index must
+# cover for us to trust it. The persistent bm25_tokens table can lag far behind
+# the live Chroma collection (e.g. a library bulk-ingested before BM25
+# persistence existed, or re-indexed only incrementally), leaving a ~5%-coverage
+# lexicon that starves the lexical leg. When coverage is below this, we rebuild
+# the full index from Chroma instead of serving the sparse one.
+BM25_MIN_COVERAGE = 0.9
+
+
+def _bm25_is_covered(hydrated_docs: int, collection) -> bool:
+    """True iff the hydrated BM25 doc count covers >=90% of the collection's
+    chunks. A small shortfall (e.g. a just-ingested file) is tolerated; a large
+    gap means the persisted index is stale/incomplete and should be rebuilt."""
+    try:
+        count = collection.count()
+    except Exception:
+        # If we can't count, assume hydration is fine rather than rebuild.
+        return True
+    if count <= 0:
+        return True
+    return hydrated_docs / count >= BM25_MIN_COVERAGE
+
+
 def _get_bm25_index(set_name, collection, backend="auto"):
     cached = _bm25_cache.get(set_name)
     if cached is not None:
@@ -612,6 +665,7 @@ def _get_bm25_index(set_name, collection, backend="auto"):
 
     # Try hydrating from the persistent BM25 tables in manifest.db.
     ids, tokdocs, df = [], [], {}
+    hydrated_docs = None
     if backend != "bm25_chroma":
         try:
             import sqlite3 as _sqlite3
@@ -653,15 +707,25 @@ def _get_bm25_index(set_name, collection, backend="auto"):
                             ids.append(cur_id)
                             tokdocs.append(cur_toks)
                         conn.close()
+                        hydrated_docs = len(ids)
                         if tokdocs:
                             from rank_bm25 import BM25Okapi
-                            bm25 = BM25Okapi(tokdocs)
-                            print(f"[chat] BM25 index ready from disk ({len(ids)} docs).",
-                                  flush=True)
-                            _bm25_cache[set_name] = {
-                                "bm25": bm25, "ids": ids, "df": df,
-                            }
-                            return _bm25_cache[set_name]
+                            if _bm25_is_covered(hydrated_docs, collection):
+                                bm25 = BM25Okapi(tokdocs)
+                                print(f"[chat] BM25 index ready from disk ({len(ids)} docs).",
+                                      flush=True)
+                                _bm25_cache[set_name] = {
+                                    "bm25": bm25, "ids": ids, "df": df,
+                                }
+                                return _bm25_cache[set_name]
+                            else:
+                                count = collection.count()
+                                print(f"[chat] persisted BM25 for '{set_name}' covers only "
+                                      f"{hydrated_docs}/{count} docs — rebuilding full index "
+                                      f"from Chroma (takes a moment)...", flush=True)
+                                # Fall through to the Chroma build below; discard
+                                # the sparse tables in favor of the full corpus.
+                                ids, tokdocs, df = [], [], {}
                 conn.close()
         except Exception as e:
             print(f"[chat] bm25 sqlite hydrate failed, falling back to Chroma: {e}",
@@ -758,11 +822,11 @@ def _rrf_fuse(*ranked_lists, k=FUSE_RRF_K):
 #                         sections are already size-capped at ingest
 #                         (parent_tokens), so this only trims children.
 # Both are configurable via config.json (`context_word_budget`,
-# `chunk_word_cap`) and default to values that keep a small-model (~2B / 8k
-# context) prompt from overflowing — the largest single cause of truncated,
-# drifting answers on tight-window models.
-CONTEXT_WORD_BUDGET = 1000
-CHUNK_WORD_CAP = 200
+# `chunk_word_cap`) and default to values that keep a small-model prompt from
+# overflowing. config.json / server.default_cfg() set 3000/300; the constants
+# below are only the fallback when config.json is missing.
+CONTEXT_WORD_BUDGET = 3000
+CHUNK_WORD_CAP = 300
 
 
 # ─── Parent-child retrieval (chunking_strategy: parent_child) ────────────────

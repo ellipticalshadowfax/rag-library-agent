@@ -18,9 +18,35 @@ repo. Do not introduce them back in.
   SSE: `delta`/`done`/`error` events, single-shot, persists via `_persist_chat`).
 - `scripts/agent.py` — chat helpers: retrieval, context building, the `SYSTEM_PROMPT`.
 - `scripts/agent_loop.py` — bounded agentic tool-calling loop for `/api/chat`:
-  lets the LLM call `search_library`, `get_section`, or `summarize_work` tools
-  mid-conversation. Falls back to a ReAct text protocol for models without
-  function-calling. Non-streaming; the SSE path stays on the single-shot path.
+  lets the LLM call `search_library`, `get_section`, `summarize_work`, `list_books`,
+  or `make_quiz` tools mid-conversation. Falls back to a ReAct text protocol for
+  models without function-calling. Accepts optional `stream_cb`/`progress_cb`: when
+  `stream_cb` is provided the final answer is regenerated as ONE streamed chat
+  completion (deltas → `stream_cb`, `reasoning_content` filtered unless
+  `show_thinking: true`) and a `__done__` marker fires at the end; `progress_cb` is
+  called ~every 1.5s during tool resolution to keep SSE alive. With neither
+  callback it stays blocking and non-streamed (backward-compatible).
+- `scripts/catalog.py` — deterministic catalog/list mode: enumerates
+  `manifest.db` titles (`list_books`, cached & invalidated on count change),
+  ranks by topic via a 3-leg reciprocal-rank fuse (title lexical, dense
+  aggregate, BM25 aggregate) in `find_books`, renders a GFM Markdown table
+  (`render_table`, no LLM), and provides list/quiz intent + topic/filter
+  extraction. Also hosts `map_reduce_summary` (deep book-wide summaries) and
+  `list_sections` (ordered sections of one work). Quiz intent takes priority
+  over list intent.
+- `scripts/study.py` — structured quiz generation. Produces `Question[]`
+  (q, choices, answer, difficulty, type, provenance with title/section/excerpt),
+  parses the model's markdown-with-delimiters output back to structure
+  (`parse_questions`), and renders via `render_markdown` with collapsible
+  `<details>` answers. `generate_quiz` validates every question's
+  `provenance.title` against the source titles actually present in the material
+  (`source_titles`/`title_matches`), dropping hallucinated citations that name a
+  book not in the material. Keep generation/validation and rendering separate so
+  future export formats (GIFT/PDF/CSV) only add renderers.
+- `web/vendor/` — vendored `marked.min.js` (v12) + `purify.min.js` (DOMPurify
+  v3) with `LICENSES.md`. Assistant turns render Markdown through
+  `renderMarkdown()` (marked → DOMPurify sanitize, allowlist includes
+  `<details>/<summary>`); user turns stay escaped. Committed (no CDN needed).
 - `scripts/ingest.py` — CLI indexer: walks a directory, extracts text, chunks,
   embeds (E5 prefixes), upserts into ChromaDB. Writes `manifest.db`. OCR-enabled
   ingests can merge OCR text back into the source PDF (`ocr_merge`).
@@ -47,8 +73,9 @@ repo. Do not introduce them back in.
   `conversations/` (gitignored). The web UI and the OpenAI-compatible endpoint
   use it to store/manage multiple chats.
 - `scripts/mcp_server.py` — MCP server exposing the library index as callable
-  tools (`search_library`, `summarize_work`, `list_collections`) so chat clients
-  like LM Studio can ground answers in the library. Stdio by default; `--http`
+  tools (`search_library`, `summarize_work`, `list_collections`, `list_books`,
+  `make_quiz`) so chat clients like LM Studio can ground answers in the library.
+  Stdio by default; `--http`
   for a remote/SSE server. Launched via `run_mcp.sh`. Must never write to stdout
   (the stdio JSON-RPC channel) — stray prints are diverted to stderr by
   `_muted_stdout()`; missing collections raise instead of `sys.exit`. Embedder +
@@ -62,8 +89,14 @@ repo. Do not introduce them back in.
 - `scripts/start_lmstudio.sh` — launches LM Studio headless at
   `http://localhost:1234/v1`.
 - `web/index.html` — single-file SPA frontend (Setup/Scan/Ingest/Chat tabs,
-  folder-picker dialog, global ingest-activity pill).
-- `config.json` — app config (embed model, LLM URL/model, chunking, sets).
+  folder-picker dialog, global ingest-activity pill). Assistant turns render
+  Markdown via the vendored marked + DOMPurify (`renderMarkdown`); the Setup
+  tab edits all chat/catalog/summary/quiz tuning keys.
+- `config.json` — app config (embed model, LLM URL/model, chunking, sets, and
+  the chat/catalog/summary/quiz knobs: `chat_mode`, `show_thinking`,
+  `context_word_budget`, `chunk_word_cap`, `history_*`, `catalog_*`,
+  `summary_*`, `quiz_*`, `max_tokens_*`). Missing keys default in
+  `server.default_cfg()`.
 - `run.sh` — one-command launcher (venv + deps + model predownload + server).
 - `run_mcp.sh` — launcher for the MCP server (stdio by default, `--http` for remote).
 - `requirements.txt`, `requirements-gpu.txt`, `README.md`.
@@ -105,7 +138,13 @@ repo. Do not introduce them back in.
   reranker (`rerank_model`, default `cross-encoder/ms-marco-MiniLM-L-6-v2`;
   disable via `rerank_enabled: false`). The BM25 index is built lazily per set
   by paginating `collection.get(limit=20000, offset=…)` (~186k chunks) and
-  cached in-process with a `df` token->doc-frequency map.
+  cached in-process with a `df` token->doc-frequency map. The index is hydrated
+  from persistent `bm25_tokens`/`bm25_df` tables in `manifest.db` (written at
+  ingest); if the persisted index covers <90% of the collection's chunks
+  (`BM25_MIN_COVERAGE`, checked via `_bm25_is_covered`) it's treated as stale and
+  rebuilt from Chroma automatically. Repair a one-off incomplete posting list
+  with `ingest.py --rebuild-bm25 --set <set>` (uses `Manifest.replace_bm25`
+  bulk writer).
 - **Two tokenizers in `agent.py`**: `stem_tokens()` (English snowballstemmer)
   is used ONLY for the low-relevance guard's term-presence check (small text,
   fast). `tokenize()` (raw lowercase, no stemming) feeds the BM25 index build —
@@ -124,11 +163,24 @@ repo. Do not introduce them back in.
   MindStar book" shows 1 source) even though the context holds up to
   `max_per_title=8` chunks of it — that's intended, not a retrieval failure.
 - **Agentic loop**: `agent_loop.py` gives the LLM tool-calling access to
-  `search_library`, `get_section`, and `summarize_work`. Controlled by
-  `agentic_enabled` and `agentic_max_steps` (default 3) in `config.json`.
-  Falls back to a ReAct text protocol (`call: search_library(...)`) for models
-  or servers that lack function-calling. Non-streaming only; the SSE streaming
-  path in `server.py` stays on the single-shot retrieval path.
+  `search_library`, `get_section`, `summarize_work`, `list_books`, and
+  `make_quiz`. Controlled by `agentic_enabled` and `agentic_max_steps`
+  (default 3) in `config.json`. Falls back to a ReAct text protocol
+  (`call: search_library(...)`) for models or servers that lack
+  function-calling. When `stream_cb` is provided the final answer is
+  regenerated as ONE streamed completion (`reasoning_content` filtered unless
+  `show_thinking: true`) and the SSE path uses it with `progress_cb`
+  heartbeats during tool steps; otherwise it stays blocking and non-streamed.
+- **Catalog/list + quiz modes**: queries like "list books about X" and "quiz
+  me on Y" are detected deterministically (in `catalog.py`) in `server.py`
+  BEFORE retrieval/agent loop, and answered without passage retrieval. List
+  results render via `CAT.render_table` (no LLM); quizzes via `study.py`
+  (structured `Question[]` + collapsible `<details>` answers). Quiz intent
+  takes priority over list. `chat_mode` ("agentic" default vs "single")
+  controls whether the web SSE path runs the streaming agentic loop or the
+  old single-shot path. The catalog cache in `catalog.list_books` is
+  invalidated when `collection.count()` changes. Map-reduce deep summaries
+  (`summary_strategy: "map_reduce"`) run only for named works (title_mode).
 
 ## Conventions / requirements
 - **NO machine-specific paths or PII.** Use placeholders (`/path/to/your/library`),
