@@ -56,8 +56,18 @@ def source_titles(material: str) -> list:
     return titles
 
 
+def norm_tokens(s) -> str:
+    """Normalize a free-text answer/string for tolerant token comparison.
+
+    Lowercases, drops non-alphanumeric runs, and collapses whitespace. Used for
+    grading fill_blank answers (and by title_matches below) so minor punctuation
+    or spacing differences don't count as a miss.
+    """
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).split())
+
+
 def _norm_title(s) -> str:
-    return re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
+    return norm_tokens(s)
 
 
 def title_matches(cite: str, valid_titles: list) -> bool:
@@ -85,9 +95,31 @@ def title_matches(cite: str, valid_titles: list) -> bool:
 
 
 def _parse_blocks(text: str):
-    """Split text on a delimiter line of 5+ dashes and trim the parts."""
-    parts = re.split(r"(?m)^-{5,}\s*$", text or "")
-    return [p.strip() for p in parts if p.strip()]
+    """Split text into per-question blocks.
+
+    Primary separator is a delimiter line of 5+ dashes (the format the model is
+    asked to produce). Some small models omit the dashes and instead just start
+    each question on its own ``QUESTION:`` line; if a segment still contains
+    more than one ``QUESTION:`` field, sub-split it at the start of each
+    ``QUESTION:`` line so every block holds exactly one question.
+    """
+    raw = text or ""
+    parts = re.split(r"(?m)^-{5,}\s*$", raw)
+    blocks = []
+    for p in parts:
+        p = p.strip()
+        if not p:
+            continue
+        starts = [m.start() for m in re.finditer(r"(?mi)^QUESTION\s*:", p)]
+        if len(starts) > 1:
+            for i, s in enumerate(starts):
+                end = starts[i + 1] if i + 1 < len(starts) else len(p)
+                seg = p[s:end].strip()
+                if seg:
+                    blocks.append(seg)
+        else:
+            blocks.append(p)
+    return blocks
 
 
 def parse_questions(text: str) -> list:
@@ -205,6 +237,17 @@ def generate_quiz(topic_or_title, material, cfg, client):
     # titles keeps every question grounded and citable.
     valid = source_titles(material)
     if valid:
+        # Small models sometimes omit the SOURCE line (or cite a wrong / loosely-
+        # phrased title). When material comes from exactly ONE known title, the
+        # question is grounded in that work by construction, so backfill any
+        # question whose cited title doesn't clearly resolve rather than dropping
+        # it. Guessing is only safe when there's a single unambiguous source;
+        # multi-source material keeps the strict hallucination filter.
+        if len(valid) == 1:
+            for q in questions:
+                t = (q.get("provenance") or {}).get("title") or ""
+                if not title_matches(t, valid):
+                    q.setdefault("provenance", {})["title"] = valid[0]
         questions = [q for q in questions
                       if title_matches((q.get("provenance") or {}).get("title") or "", valid)]
     return questions, None

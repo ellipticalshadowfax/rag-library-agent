@@ -141,7 +141,11 @@ _TOOLS = [
             "description": "Generate a structured practice quiz (MCQ or "
                            "short-answer) on a topic or a named work, with "
                            "collapsible answers and source citations. Useful "
-                           "when the user asks to be quizzed or tested.",
+                           "when the user asks to be quizzed or tested. "
+                           "kind='quick' (default) returns the questions inline "
+                           "in the reply; kind='stored' (or a large count > 25) "
+                           "plans + builds a persistent quiz via the SESSION 3 "
+                           "pipeline and returns its id + summary.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -151,11 +155,127 @@ _TOOLS = [
                               "description": "number of questions",
                               "default": 10},
                     "kind": {"type": "string",
-                             "description": "question type: 'mcq' or "
-                                            "'short_answer'",
-                             "default": "mcq"},
+                             "description": "'quick' (inline) or 'stored' "
+                                            "(persistent, audited build)",
+                             "default": "quick"},
                 },
                 "required": ["topic"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "plan_quiz",
+            "description": "Plan a persistent quiz (a spec) against a whole "
+                           "work, explicit sections, or a topic. Returns the "
+                           "plan as numbered options the user can confirm or "
+                           "adjust before building. Use for 'quiz me on X' "
+                           "when a stored/reviewable quiz is wanted.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "request": {"type": "object", "description": "planning "
+                                "request: {mode: work|sections|topic, work/topic, count, "
+                                "difficulty, types[], depth}"},
+                    "set_name": {"type": "string", "description": "collection",
+                                 "default": ""},
+                },
+                "required": ["request"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "build_quiz",
+            "description": "Build (generate) a persistent quiz from a spec "
+                           "created by plan_quiz. Returns the quiz id, "
+                           "question count, and a short summary.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "spec_id": {"type": ["string", "null"], "description": "id "
+                                "of a saved spec from plan_quiz"},
+                    "spec": {"type": ["object", "null"], "description": "an "
+                             "inline spec dict (alternative to spec_id)"},
+                    "set_name": {"type": "string", "description": "collection",
+                                 "default": ""},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_quiz",
+            "description": "Fetch a stored quiz by id: its questions, answers, "
+                           "counts, and build report. Use after build_quiz to "
+                           "show the user the result.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "quiz_id": {"type": "string", "description": "quiz id"},
+                },
+                "required": ["quiz_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "grade_answer",
+            "description": "Grade a single answer to one question of a stored "
+                           "quiz. Returns correct/incorrect + feedback. "
+                           "Deterministic for mcq/true_false/fill_blank; "
+                           "LLM-assisted for short answers.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "quiz_id": {"type": "string", "description": "quiz id"},
+                    "qid": {"type": "string", "description": "question id"},
+                    "response": {"type": "string", "description": "the user's answer"},
+                },
+                "required": ["quiz_id", "qid", "response"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "review_queue",
+            "description": "Fetch the due FSRS spaced-repetition review cards "
+                           "(missed questions) for a collection. Returns the "
+                           "due count and each due card's question + source. "
+                           "Use when the user asks about review/to-dos.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "set_name": {"type": "string", "description": "collection",
+                                 "default": ""},
+                    "limit": {"type": "integer", "description": "max cards",
+                              "default": 20},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "study_stats",
+            "description": "Fetch study/review statistics: total review cards, "
+                           "due now, retention rate, and strength. Use when "
+                           "the user asks how their studying/reviews are "
+                           "going.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "set_name": {"type": "string", "description": "collection",
+                                 "default": ""},
+                },
+                "required": [],
             },
         },
     },
@@ -287,22 +407,30 @@ def _tool_summarize_work_deep(title, ctx):
             + summary)
 
 
-def _tool_make_quiz(topic, count, ctx):
-    """Generate a quiz on a topic/work via study.generate_quiz."""
-    import study
+def _tool_make_quiz(topic, count, kind, ctx):
+    """Generate a quiz on a topic/work. ``kind == 'stored'`` (or a large
+    count) routes through the SESSION 2/3 planner + audited builder so the
+    quiz persists and can be reviewed; the default 'quick' path returns the
+    questions inline via study.generate_quiz (backward-compatible)."""
     set_name = ctx["set_name"]
     cfg = ctx["cfg"]
     topic = (topic or "").strip()
     try:
-        count = max(1, min(int(count or 10), 50))
+        count = max(1, min(int(count or 10), 200))
     except (TypeError, ValueError):
         count = int(cfg.get("quiz_default_count", 10) or 10)
+    kind = (kind or "quick").strip().lower()
+    # Large counts and explicit 'stored' use the planner + audited builder.
+    stored = kind == "stored" or count > 25
+    if stored:
+        return _quiz_plan_and_build(topic, count, cfg, set_name, ctx,
+                                    return_summary=True)
+    import study
     import agent as agent_mod
     embedder = ctx["embedder"]
     collection = ctx["collection"]
-    # Keep the material small enough to fit a tight-window model (see the note
-    # on QUIZ_MATERIAL_* in server.py) — 24 × 300 words blows an 8k context.
-    MC, MW = 10, 140
+    MC = max(1, min(int(cfg.get("quiz_material_chunks", 10) or 10), 100))
+    MW = max(10, min(int(cfg.get("quiz_material_words", 140) or 140), 5000))
     material = None
     matched = agent_mod._match_titles(topic, set_name)
     if matched:
@@ -338,6 +466,190 @@ def _tool_make_quiz(topic, count, ctx):
     return head + study.render_markdown(questions)
 
 
+def _quiz_plan_and_build(topic, count, cfg, set_name, ctx, return_summary=False):
+    """Plan + build a persistent quiz for a topic/work and return either a
+    summary referencing the stored quiz (return_summary) or the quiz dict."""
+    import quiz_plan
+    import quiz_build
+    count = max(1, min(int(count or 10), 200))
+    plan = quiz_plan.plan_quiz(
+        {"mode": "topic", "topic": topic, "count": count}, set_name, cfg,
+        embedder=ctx["embedder"], collection=ctx["collection"])
+    if "error" in plan or plan.get("out_of_scope"):
+        return (f"(Could not plan a quiz on {topic!r}: "
+                f"{plan.get('error') or plan.get('refusal') or 'out of scope'})")
+    spec = plan["spec"]
+    # Persist isn't guaranteed true in plan_quiz; save explicitly if absent.
+    if not spec.get("id"):
+        spec = quiz_store_create_spec(spec)
+    try:
+        quiz = quiz_build.build_quiz(
+            spec, set_name, cfg, ctx["client"],
+            collection=ctx["collection"], embedder=ctx["embedder"])
+    except Exception as e:
+        return f"(Quiz build failed: {e})"
+    if return_summary:
+        return _quiz_summary(quiz)
+    return quiz
+
+
+def _quiz_store():
+    import quiz_store
+    return quiz_store
+
+
+def quiz_store_create_spec(spec):
+    return _quiz_store().create_spec(spec)
+
+
+def _quiz_summary(quiz):
+    qid = quiz.get("id")
+    n = len(quiz.get("questions") or [])
+    status = quiz.get("status")
+    body = (f"# Quiz built: {quiz.get('title') or quiz.get('id')}  "
+            f"(set: {quiz.get('set_name')})\n\n"
+            f"- **Quiz id**: `{qid}`\n- **Questions**: {n}\n"
+            f"- **Status**: {status}\n")
+    report = quiz.get("report") or {}
+    if report:
+        body += (f"- **Structured output**: {report.get('structured_output')}\n"
+                 f"- **Accepted**: {report.get('total_accepted')} / "
+                 f"{report.get('total_requested')} requested\n")
+        if report.get("warnings"):
+            body += "- **Warnings**: " + "; ".join(report["warnings"][:4]) + "\n"
+    return body + "\nUse `get_quiz(id)` to view the questions."
+
+
+def _tool_plan_quiz(request, set_name, ctx):
+    import quiz_plan
+    cfg = ctx["cfg"]
+    set_name = set_name or ctx["set_name"]
+    if not isinstance(request, dict):
+        return "(plan_quiz needs a `request` object.)"
+    plan = quiz_plan.plan_quiz(
+        request, set_name, cfg,
+        embedder=ctx["embedder"], collection=ctx["collection"])
+    if "error" in plan:
+        return f"(plan_quiz failed: {plan['error']})"
+    if plan.get("out_of_scope"):
+        return (f"(Out of scope: {plan.get('refusal') or 'no matching units'})")
+    spec = plan["spec"]
+    if not spec.get("id"):
+        spec = quiz_store_create_spec(spec)
+    units = spec.get("units") or []
+    lines = [f"# Quiz plan: {spec.get('title')}  (set: {set_name})",
+             f"- **Spec id**: `{spec.get('id')}`",
+             f"- **Mode**: {spec.get('mode')} · **Depth**: {spec.get('depth')}",
+             f"- **Total questions**: {spec.get('count')}",
+             "",
+             "Units (number the user can option from):",
+             ]
+    for i, u in enumerate(units, 1):
+        lines.append(f"{i}. {u.get('title')} — {u.get('allocation')} q"
+                     f" (ordinal {u.get('ordinal')})")
+    if spec.get("warnings"):
+        lines.append("")
+        lines.append("Warnings: " + "; ".join(spec["warnings"][:4]))
+    lines.append("")
+    lines.append("Confirm with `build_quiz(spec_id)` or ask to adjust a unit "
+                 "(e.g. 'double the questions on unit 2').")
+    return "\n".join(lines)
+
+
+def _tool_build_quiz(spec_id, spec, set_name, ctx):
+    import quiz_build
+    import quiz_store
+    cfg = ctx["cfg"]
+    set_name = set_name or ctx["set_name"]
+    if spec is None and spec_id:
+        spec = quiz_store.get_spec(spec_id)
+    if spec is None:
+        return "(build_quiz needs a `spec_id` or an inline `spec`.)"
+    try:
+        quiz = quiz_build.build_quiz(
+            spec, set_name, cfg, ctx["client"],
+            collection=ctx["collection"], embedder=ctx["embedder"])
+    except Exception as e:
+        return f"(Quiz build failed: {e})"
+    return _quiz_summary(quiz)
+
+
+def _tool_get_quiz(quiz_id, set_name, ctx):
+    quiz = _quiz_store().get_quiz(quiz_id)
+    if not quiz:
+        return (f"(No quiz found for id {quiz_id!r} in set {ctx['set_name']}.)")
+    questions = quiz.get("questions") or []
+    lines = [f"# Quiz: {quiz.get('title')}  (set: {quiz.get('set_name')})",
+             f"- **id**: `{quiz.get('id')}` · **questions**: {len(questions)}"
+             f" · **status**: {quiz.get('status')}",
+             ""]
+    for i, qu in enumerate(questions, 1):
+        lines.append(f"**{i}. {qu.get('q')}** ({qu.get('type')}, "
+                     f"{qu.get('difficulty')})")
+        if qu.get("choices"):
+            lines.append("  " + " | ".join(qu.get("choices")))
+        lines.append(f"  *Answer: {qu.get('answer')}*")
+        prov = qu.get("provenance") or {}
+        if prov.get("title"):
+            lines.append(f"  *Source: {prov.get('title')}"
+                         + (f" — {qu.get('section_title') or prov.get('section_title')}"
+                            if qu.get('section_title') or prov.get('section_title') else "")
+                         + "*")
+        lines.append("")
+    report = quiz.get("report") or {}
+    if report and report.get("warnings"):
+        lines.append("Warnings: " + "; ".join(report["warnings"][:4]))
+    return "\n".join(lines) or f"(Quiz {quiz_id} has no questions yet.)"
+
+
+def _tool_grade_answer(quiz_id, qid, response, set_name, ctx):
+    import quiz_grade
+    quiz = _quiz_store().get_quiz(quiz_id)
+    if not quiz:
+        return f"(No quiz found for id {quiz_id!r}.)"
+    q = next((x for x in (quiz.get("questions") or [])
+              if str(x.get("qid")) == str(qid)), None)
+    if q is None:
+        return f"(No question {qid!r} in quiz {quiz_id!r}.)"
+    graded = quiz_grade.grade_answer(q, response, ctx["cfg"], ctx["client"])
+    if graded is None:
+        return f"(Could not grade question {qid!r}.)"
+    verdict = "correct" if graded.get("correct") else "incorrect"
+    body = (f"# Grade: {verdict}\n\n- **Your answer**: {response}\n"
+            f"- **Expected**: {graded.get('expected')}\n"
+            f"- **Score**: {graded.get('score')}\n")
+    if graded.get("feedback"):
+        body += f"- **Feedback**: {graded.get('feedback')}\n"
+    return body
+
+
+def _tool_review_queue(set_name, limit, ctx):
+    cards = _quiz_store().fetch_due_reviews(
+        set_name=set_name or ctx["set_name"], limit=max(1, min(int(limit or 20), 50)))
+    if not cards:
+        return (f"(No review cards are due in set "
+                f"'{set_name or ctx['set_name']}' right now.)")
+    lines = [f"# Due review cards ({len(cards)})  (set: {set_name or ctx['set_name']})", ""]
+    for c in cards:
+        q = c.get("question") or {}
+        prov = q.get("provenance") or {}
+        src = prov.get("section_title") or prov.get("title") or ""
+        lines.append(f"- **{c.get('key')}** — {q.get('q') or ''}"
+                     + (f"  (source: {src})" if src else ""))
+    lines.append("")
+    lines.append("Rate with `grade_answer` or in the Study tab Review pane.")
+    return "\n".join(lines)
+
+
+def _tool_study_stats(set_name, ctx):
+    st = _quiz_store().fetch_review_stats(set_name or ctx["set_name"])
+    return (f"# Study stats  (set: {set_name or ctx['set_name']})\n\n"
+            f"- **Cards enrolled**: {st.get('total_cards')}\n"
+            f"- **Due now**: {st.get('due_count')} · **New**: {st.get('new_count')}\n"
+            f"- **Reviewed**: {st.get('reviewed_count')} · "
+            f"**Retention**: {st.get('retention_rate', 0) * 100:.1f}%")
+
+
 def _exec_tool(name, args, ctx):
     """Dispatch a tool call (function-calling or ReAct) to its Python impl."""
     a = args or {}
@@ -359,7 +671,22 @@ def _exec_tool(name, args, ctx):
             a.get("topic", "") or "", a.get("filter_kind"),
             ctx["set_name"], ctx["cfg"], ctx["collection"], ctx["embedder"])
     if name == "make_quiz":
-        return _tool_make_quiz(a.get("topic", ""), a.get("count", 10), ctx)
+        return _tool_make_quiz(a.get("topic", ""), a.get("count", 10),
+                               a.get("kind", "quick"), ctx)
+    if name == "plan_quiz":
+        return _tool_plan_quiz(a.get("request"), a.get("set_name", ""), ctx)
+    if name == "build_quiz":
+        return _tool_build_quiz(a.get("spec_id"), a.get("spec"),
+                                a.get("set_name", ""), ctx)
+    if name == "get_quiz":
+        return _tool_get_quiz(a.get("quiz_id", ""), a.get("set_name", ""), ctx)
+    if name == "grade_answer":
+        return _tool_grade_answer(a.get("quiz_id", ""), a.get("qid", ""),
+                                  a.get("response", ""), a.get("set_name", ""), ctx)
+    if name == "review_queue":
+        return _tool_review_queue(a.get("set_name", ""), a.get("limit", 20), ctx)
+    if name == "study_stats":
+        return _tool_study_stats(a.get("set_name", ""), ctx)
     return f"(Unknown tool: {name})"
 
 

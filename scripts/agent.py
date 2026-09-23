@@ -644,10 +644,12 @@ _bm25_cache = {}  # set_name -> {"bm25": BM25Okapi, "ids": [chunk ids], "df": {t
 BM25_MIN_COVERAGE = 0.9
 
 
-def _bm25_is_covered(hydrated_docs: int, collection) -> bool:
+def _bm25_is_covered(hydrated_docs: int, collection, cfg: dict | None = None) -> bool:
     """True iff the hydrated BM25 doc count covers >=90% of the collection's
     chunks. A small shortfall (e.g. a just-ingested file) is tolerated; a large
     gap means the persisted index is stale/incomplete and should be rebuilt."""
+    cf = cfg or {}
+    min_cov = cf.get("bm25_min_coverage", BM25_MIN_COVERAGE)
     try:
         count = collection.count()
     except Exception:
@@ -655,13 +657,16 @@ def _bm25_is_covered(hydrated_docs: int, collection) -> bool:
         return True
     if count <= 0:
         return True
-    return hydrated_docs / count >= BM25_MIN_COVERAGE
+    return hydrated_docs / count >= min_cov
 
 
-def _get_bm25_index(set_name, collection, backend="auto"):
+def _get_bm25_index(set_name, collection, backend="auto", cfg: dict | None = None):
+    cf = cfg or {}
     cached = _bm25_cache.get(set_name)
     if cached is not None:
         return cached
+
+    batch = int(cf.get("bm25_batch", BM25_BATCH) or BM25_BATCH)
 
     # Try hydrating from the persistent BM25 tables in manifest.db.
     ids, tokdocs, df = [], [], {}
@@ -710,7 +715,7 @@ def _get_bm25_index(set_name, collection, backend="auto"):
                         hydrated_docs = len(ids)
                         if tokdocs:
                             from rank_bm25 import BM25Okapi
-                            if _bm25_is_covered(hydrated_docs, collection):
+                            if _bm25_is_covered(hydrated_docs, collection, cf):
                                 bm25 = BM25Okapi(tokdocs)
                                 print(f"[chat] BM25 index ready from disk ({len(ids)} docs).",
                                       flush=True)
@@ -739,7 +744,7 @@ def _get_bm25_index(set_name, collection, backend="auto"):
         offset = 0
         df = {}
         while True:
-            res = collection.get(limit=BM25_BATCH, offset=offset, include=["documents"])
+            res = collection.get(limit=batch, offset=offset, include=["documents"])
             batch_ids = res.get("ids") or []
             batch_docs = res.get("documents") or []
             if not batch_ids:
@@ -752,7 +757,7 @@ def _get_bm25_index(set_name, collection, backend="auto"):
                     for tk in set(toks):
                         df[tk] = df.get(tk, 0) + 1
             offset += len(batch_ids)
-            if len(batch_ids) < BM25_BATCH:
+            if len(batch_ids) < batch:
                 break
         from rank_bm25 import BM25Okapi
         bm25 = BM25Okapi(tokdocs)
@@ -766,9 +771,12 @@ def _get_bm25_index(set_name, collection, backend="auto"):
     return _bm25_cache[set_name]
 
 
-def _bm25_leg(set_name, query, skip_ids, collection, n=BM25_TOP_N, backend="auto"):
+def _bm25_leg(set_name, query, skip_ids, collection, n=None, backend="auto", cfg: dict | None = None):
     """Return hits for the top-n BM25 results not already in the dense pool."""
-    idx = _get_bm25_index(set_name, collection, backend=backend)
+    cf = cfg or {}
+    if n is None:
+        n = int(cf.get("bm25_top_n", BM25_TOP_N) or BM25_TOP_N)
+    idx = _get_bm25_index(set_name, collection, backend=backend, cfg=cf)
     toks = tokenize(query)
     if not toks:
         return []
@@ -924,7 +932,8 @@ def retrieve_rag(set_name, query, top_k, filter_kind, cfg,
     # widens coverage; lowering it tightens the prompt. The pool cap protects
     # latency since every extra candidate costs a rerank call.
     top_k = min(top_k, 8)
-    pool_k = min(top_k * 3, 30)
+    dense_mult = int(cfg.get("dense_pool_multiplier", 3) or 3)
+    pool_k = min(top_k * dense_mult, 30)
 
     # Context budget is configurable (`context_word_budget`, `chunk_word_cap`)
     # and defaults to values that keep a small / tight-window model on-track.
@@ -965,19 +974,22 @@ def retrieve_rag(set_name, query, top_k, filter_kind, cfg,
 
         # Lexical leg: BM25 hybrid + RRF fusion over (dense pool, BM25 top-ups).
         try:
-            bm25_hits = _bm25_leg(set_name, query, {h["id"] for h in hits}, collection, backend=backend)
+            bm25_hits = _bm25_leg(set_name, query, {h["id"] for h in hits}, collection, backend=backend, cfg=cfg)
         except Exception as e:
             print(f"[chat] bm25 leg failed: {e}")
             bm25_hits = []
         if bm25_hits:
+            rrf_k = int(cfg.get("fuse_rrf_k", FUSE_RRF_K) or FUSE_RRF_K)
+            floor = int(cfg.get("fused_pool_floor", 40) or 40)
             dense = sorted(hits, key=lambda h: h.get("distance")
                            if h.get("distance") is not None else 2.0)
             bm = sorted(bm25_hits, key=lambda h: h["bm25_score"], reverse=True)
-            hits = _rrf_fuse(dense, bm)[:max(pool_k, 40)]
+            hits = _rrf_fuse(dense, bm, k=rrf_k)[:max(pool_k, floor)]
 
         # Cross-encoder rerank of fused candidates.
         if reranker is not None:
-            hits, _ = rerank_hits(hits, query, reranker, top_n=24)
+            rtop = int(cfg.get("rerank_top_n", 24) or 24)
+            hits, _ = rerank_hits(hits, query, reranker, top_n=rtop)
 
     # Parent-child retrieval: map the retrieved children to their section
     # parents (search unit = child, generation unit = parent). Only active
@@ -999,7 +1011,7 @@ def retrieve_rag(set_name, query, top_k, filter_kind, cfg,
     # guard sees exactly what the generation context will contain.
     common_terms = set()
     try:
-        idx = _get_bm25_index(set_name, collection, backend=backend)
+        idx = _get_bm25_index(set_name, collection, backend=backend, cfg=cfg)
         n = max(idx["bm25"].corpus_size, 1)
         common_terms = {t for t, f in idx["df"].items() if f / n >= 0.01}
     except Exception as e:
