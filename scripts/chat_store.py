@@ -127,6 +127,33 @@ def get_pending_catalog(cid: str) -> dict | None:
     return conv.get("pending_catalog") or None
 
 
+def set_pending_quiz_spec(cid: str, pending: dict | None) -> dict | None:
+    """Persist (or clear) the pending quiz-spec proposal for a conversation.
+
+    Used by SESSION 6's conversational spec negotiation: a quiz request stores a
+    spec proposal here, and follow-up messages apply deltas to it. Currently
+    only stored/cleared (endpoints in SESSION 2 expose it) and is not yet
+    consumed by the chat flow.
+    """
+    conv = get_conversation(cid)
+    if not conv:
+        return None
+    if pending:
+        conv["pending_quiz_spec"] = pending
+    else:
+        conv.pop("pending_quiz_spec", None)
+    conv["updated"] = _now()
+    _path(cid).write_text(json.dumps(conv, indent=2), encoding="utf-8")
+    return conv
+
+
+def get_pending_quiz_spec(cid: str) -> dict | None:
+    conv = get_conversation(cid)
+    if not conv:
+        return None
+    return conv.get("pending_quiz_spec") or None
+
+
 def add_message(cid: str, role: str, content: str, meta: dict = None) -> dict | None:
     """Append a message. Auto-titles the conversation from its first user turn."""
     conv = get_conversation(cid)

@@ -33,6 +33,8 @@ RESULTS_PATH = EVALS_DIR / "results.json"
 BASELINE_PATH = EVALS_DIR / "baseline.json"
 METRIC_KEYS = ["hit@5", "hit@10", "mrr@5", "mrr@10",
                "context_recall", "context_precision"]
+# SESSION 6: topic->works discovery (catalog.find_books) is regression-gated too.
+TOPIC_METRIC_KEYS = ["catalog_hit@5", "catalog_hit@10", "catalog_recall"]
 
 _embedder = {"obj": None}
 _reranker = {"obj": None, "model": None}
@@ -136,12 +138,48 @@ def _evaluate_query(item, top_k, cfg):
     return result
 
 
-def _aggregate(query_records):
+def _aggregate(query_records, key="metrics"):
     agg = {}
-    for key in METRIC_KEYS:
-        vals = [q["metrics"][key] for q in query_records]
-        agg[key] = round(sum(vals) / len(vals), 4) if vals else 0.0
+    keys = METRIC_KEYS if key == "metrics" else TOPIC_METRIC_KEYS
+    records = [q for q in query_records if q.get(key)]
+    for mkey in keys:
+        vals = [q[key][mkey] for q in records if mkey in q[key]]
+        agg[mkey] = round(sum(vals) / len(vals), 4) if vals else 0.0
     return agg
+
+
+def _title_match(a, b):
+    a = (a or "").strip().lower()
+    b = (b or "").strip().lower()
+    if not a or not b:
+        return False
+    return a in b or b in a
+
+
+def _compute_topic_metrics(item, cfg, top_k):
+    """Score topic->works discovery via catalog.find_books (no LLM)."""
+    import catalog
+    set_name = item["set"]
+    topic = item["query"]
+    expected = item.get("expected_works") or item.get("expected_titles") or \
+        [item["expected_title"]]
+    try:
+        collection = _get_collection(set_name)
+        books = catalog.find_books(
+            topic, set_name, item.get("filter_kind"), cfg,
+            collection=collection, embedder=_get_embedder(cfg))
+    except Exception as e:
+        raise ValueError(f"topic find_books failed: {e}")
+    ranked = [b.get("title") for b in books]
+    mets = {}
+    for k in (5, 10):
+        mets[f"catalog_hit@{k}"] = float(
+            any(any(_title_match(rt, ex) for ex in expected)
+                for rt in ranked[:k]))
+    found = sum(1 for ex in expected
+                if any(_title_match(rt, ex) for rt in ranked[:len(ranked)]))
+    mets["catalog_recall"] = round(found / len(expected), 4) if expected else 0.0
+    return mets, ranked
 
 
 def cmd_run(args):
@@ -162,6 +200,27 @@ def cmd_run(args):
     records = []
     for i, item in enumerate(items, 1):
         q, expected, s = item["query"], item["expected_title"], item["set"]
+        mode = item.get("mode") or ("topic" if item.get("expected_works")
+                                    or item.get("expected_titles") else "retrieval")
+        if mode == "topic":
+            try:
+                tmets, ranked = _compute_topic_metrics(item, cfg, args.top_k)
+            except Exception as e:
+                print(f"[eval] [{s}] SKIP topic '{q}': {e}")
+                continue
+            records.append({
+                "query": q, "expected_title": expected, "set": s,
+                "filter_kind": item.get("filter_kind"),
+                "mode": "topic",
+                "expected_works": (item.get("expected_works")
+                                   or item.get("expected_titles") or []),
+                "topic_metrics": tmets,
+                "topic_ranked": ranked,
+            })
+            print(f"[eval] ({i}/{len(items)}) [{s}] c_hit@5={tmets['catalog_hit@5']}"
+                  f" c_recall={tmets['catalog_recall']}"
+                  f" | topic '{q}' -> {ranked[:5]}")
+            continue
         try:
             result = _evaluate_query(item, args.top_k, cfg)
             mets = _compute_metrics(result, expected)
@@ -171,6 +230,7 @@ def cmd_run(args):
         records.append({
             "query": q, "expected_title": expected, "set": s,
             "filter_kind": item.get("filter_kind"),
+            "mode": "retrieval",
             "metrics": mets,
             "retrieval": {
                 "num_hits": len(result["hits"]),
@@ -194,19 +254,28 @@ def cmd_run(args):
         print("[eval] no queries evaluated")
         return 1
 
+    ret_metrics = _aggregate(records, "metrics")
+    topic_metrics = _aggregate(records, "topic_metrics")
     summary = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "top_k": args.top_k,
         "num_queries": len(records),
+        "num_retrieval": len([r for r in records if r.get("metrics")]),
+        "num_topic": len([r for r in records if r.get("topic_metrics")]),
         "sets": sorted({r["set"] for r in records}),
-        "metrics": _aggregate(records),
+        "metrics": ret_metrics,
+        "topic_metrics": topic_metrics,
         "queries": records,
     }
     EVALS_DIR.mkdir(parents=True, exist_ok=True)
     RESULTS_PATH.write_text(json.dumps(summary, indent=2))
-    print("\n[eval] summary:")
-    for key, val in summary["metrics"].items():
+    print("\n[eval] retrieval summary:")
+    for key, val in ret_metrics.items():
         print(f"    {key:20s} {val:.4f}")
+    if topic_metrics:
+        print("[eval] topic->works summary:")
+        for key, val in topic_metrics.items():
+            print(f"    {key:20s} {val:.4f}")
     print(f"[eval] wrote {RESULTS_PATH}")
     return 0
 
@@ -230,12 +299,26 @@ def cmd_diff(args):
     failed = False
     print("[eval] diff vs baseline (tolerance "
           f"{tol:.0%}):")
+    # Retrieval metrics (all modes' retrieval records, if present).
     for key in METRIC_KEYS:
+        if key not in base.get("metrics", {}):
+            continue
         c, b = cur["metrics"].get(key, 0.0), base["metrics"].get(key, 0.0)
         regressed = c < b * (1 - tol)
         failed = failed or regressed
         print(f"    {key:20s} baseline {b:.4f}  current {c:.4f}"
               f"  {'REGRESSION' if regressed else 'ok'}")
+    # Session 6 topic->works discovery metrics.
+    if base.get("topic_metrics"):
+        for key in TOPIC_METRIC_KEYS:
+            if key not in base["topic_metrics"]:
+                continue
+            c, b = (cur.get("topic_metrics") or {}).get(key, 0.0), \
+                base["topic_metrics"].get(key, 0.0)
+            regressed = c < b * (1 - tol)
+            failed = failed or regressed
+            print(f"    {key:20s} baseline {b:.4f}  current {c:.4f}"
+                  f"  {'REGRESSION' if regressed else 'ok'}")
     if failed:
         print("[eval] FAIL: metric(s) dropped by more than "
               f"{tol:.0%}")

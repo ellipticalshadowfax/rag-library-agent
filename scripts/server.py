@@ -35,6 +35,12 @@ import ingest as ING
 import scan as SCAN
 import catalog as CAT
 import study as STUDY
+import quiz_build
+import quiz_export
+import quiz_grade
+import quiz_plan
+import quiz_syllabus
+import quiz_store
 
 app = Flask(__name__, static_folder=str(RAG_ROOT / "web"), static_url_path="/web")
 CORS(app)
@@ -189,12 +195,52 @@ def default_cfg():
         "summary_context_budget": 8000,
         "quiz_default_count": 10,
         "quiz_output_format": "markdown",
+        # Quiz planning knobs (SESSION 2).
+        "quiz_depth": "balanced",
+        "quiz_topic_max_works": 3,
+        "quiz_topic_section_pool": 120,
+        # Quiz material caps (SESSION 1: consolidated from server.py/agent_loop.py
+        # /mcp_server.py so all three sites read the same config keys).
+        "quiz_material_chunks": 10,
+        "quiz_material_words": 140,
+        # Quiz generation + audit pipeline (SESSION 3): per-batch generation over
+        # the parents walk, the 4-stage accuracy audit, and the structured-output
+        # capability probe. Advanced keys, tool-tweakable in config.json.
+        "quiz_batch_parents": 4,
+        "quiz_parent_word_cap": 500,
+        "quiz_max_batches": 12,
+        "quiz_verify_pass": True,
+        "quiz_grounding_ratio": 0.85,
+        "quiz_dedupe_jaccard": 0.75,
+        "llm_structured_output": "auto",
+        # Quiz grading + analytics (SESSION 4): deterministic grading for
+        # mcq/true_false/fill_blank, LLM-assisted grading for short answers, and
+        # the weak unit threshold for analytics. Advanced keys.
+        "quiz_grade_llm": True,
+        "quiz_weak_threshold": 0.6,
+        # FSRS spaced-repetition review (SESSION 5): when true, missed/weak
+        # questions are enrolled into the shared review store at attempt
+        # finish so they resurface on an FSRS schedule in the Review pane.
+        "fsrs_enabled": True,
+        "quiz_review_limit": 50,
         "retrieval_top_k": 10,
         "relevance_threshold": 0.80,
         "max_retrieval_hops": 2,
         "retrieval_hops_driver": "llm",
         "rerank_model": "cross-encoder/ms-marco-MiniLM-L-6-v2",
         "rerank_enabled": True,
+        # Advanced/internal retrieval tuning (SESSION 1: promoted from hardcoded
+        # constants in agent.py so any tool can read/tweak them in one place.
+        # NOT rendered in the Setup tab; defaults keep retrieval bit-identical).
+        "fuse_rrf_k": 60,
+        "bm25_top_n": 30,
+        "bm25_batch": 20000,
+        "bm25_min_coverage": 0.9,
+        "rerank_top_n": 24,
+        "max_chunks_per_title": 3,
+        "dense_pool_multiplier": 3,
+        "fused_pool_floor": 40,
+        "lexical_backend": "auto",
         "fiction_tags": ["Fiction", "Short Stories", "Literary"],
         "ocr_enabled": False,
         "ocr_merge": True,
@@ -203,6 +249,156 @@ def default_cfg():
         "ocr_languages": ["en"],
         "sets": {},
     }
+
+
+def cfg_int(cfg: dict, key: str, default: int, lo=None, hi=None) -> int:
+    """Read an int config key, clamped to its registry [lo, hi] range.
+
+    Falls back to ``default`` when the key is missing/invalid, matching the
+    module-level constant default so retrieval behavior stays bit-identical
+    unless a key is explicitly set in config.json.
+    """
+    try:
+        v = int(cfg.get(key, default))
+    except (TypeError, ValueError):
+        return default
+    if lo is not None:
+        v = max(lo, v)
+    if hi is not None:
+        v = min(hi, v)
+    return v
+
+
+def cfg_float(cfg: dict, key: str, default: float, lo=None, hi=None) -> float:
+    """Read a float config key, clamped to its registry [lo, hi] range."""
+    try:
+        v = float(cfg.get(key, default))
+    except (TypeError, ValueError):
+        return default
+    if lo is not None:
+        v = max(lo, v)
+    if hi is not None:
+        v = min(hi, v)
+    return v
+
+
+# ─── Config registry (single source of metadata) ─────────────────────────────
+#
+# `default_cfg()` above is the single source of DEFAULTS; CONFIG_META here is
+# the single source of METADATA (label / group / range / advanced flag /
+# description) for every config key. Never hand-maintain the POST allowlist —
+# it is derived from this registry (see api_config_set). Keys with
+# ``editable=False`` are managed values (setup state, per-set data) that the
+# API must not overwrite. Advanced keys are tool-tweakable (settable in
+# config.json) but are NOT shown as UI controls in the Setup tab.
+CONFIG_META = {
+    # Model / embedding
+    "embed_model":       {"label": "Embed model", "group": "Model", "advanced": False, "editable": True, "description": "Sentence-transformers embedding model id."},
+    "embed_device":      {"label": "Embed device", "group": "Model", "advanced": False, "editable": True, "description": "Device used for embeddings (cpu)."},
+    "embed_dim":         {"label": "Embed dim", "group": "Model", "advanced": False, "editable": True, "description": "Embedding dimensionality for the collection."},
+
+    # Indexing
+    "chunk_tokens":      {"label": "Chunk tokens", "group": "Indexing", "min": 64, "max": 2000, "advanced": False, "editable": True, "description": "Target tokens per chunk for flat indexing."},
+    "chunk_overlap":     {"label": "Chunk overlap", "group": "Indexing", "min": 0, "max": 500, "advanced": False, "editable": True, "description": "Token overlap between adjacent chunks."},
+    "chunking_strategy": {"label": "Chunking strategy", "group": "Indexing", "advanced": False, "editable": True, "description": "Indexing granularity: flat or parent_child."},
+    "parent_tokens":     {"label": "Parent tokens", "group": "Indexing", "min": 100, "advanced": False, "editable": True, "description": "Section size for parent_child generation."},
+    "ingest_batch_size": {"label": "Ingest batch size", "group": "Indexing", "min": 1, "max": 5000, "advanced": False, "editable": True, "description": "Chroma upsert/embed batch size."},
+
+    # Agentic
+    "agentic_enabled":   {"label": "Agentic enabled", "group": "Chat", "advanced": True, "editable": False, "description": "Enable the tool-calling agent loop (managed)."},
+    "agentic_max_steps": {"label": "Agentic max steps", "group": "Chat", "min": 1, "max": 20, "advanced": True, "editable": False, "description": "Max tool-calling steps in the agent loop (managed)."},
+    "agentic_strategy":  {"label": "Agentic strategy", "group": "Chat", "advanced": True, "editable": False, "description": "Agentic loop strategy (auto)."},
+
+    # LLM
+    "llm_base_url":      {"label": "LLM base URL", "group": "LLM", "advanced": False, "editable": True, "description": "Base URL of the OpenAI-compatible server."},
+    "llm_model":         {"label": "LLM model", "group": "LLM", "advanced": False, "editable": True, "description": "Model name served by the LLM server."},
+    "llm_api_key":       {"label": "LLM API key", "group": "LLM", "advanced": False, "editable": True, "description": "Optional API key (masked; stored in config.local.json)."},
+    "llm_temperature":   {"label": "LLM temperature", "group": "LLM", "min": 0, "max": 2, "advanced": False, "editable": True, "description": "Generation temperature."},
+    "llm_max_tokens":    {"label": "LLM max tokens", "group": "LLM", "min": 64, "advanced": False, "editable": True, "description": "Default max tokens for generation."},
+    "max_tokens_default": {"label": "Max tokens (default QA)", "group": "LLM", "min": 64, "advanced": False, "editable": True, "description": "Max tokens for normal QA."},
+    "max_tokens_quiz":   {"label": "Max tokens (quiz)", "group": "LLM", "min": 64, "advanced": False, "editable": True, "description": "Max tokens for quiz generation."},
+    "max_tokens_summary": {"label": "Max tokens (summary)", "group": "LLM", "min": 64, "advanced": False, "editable": True, "description": "Max tokens for summaries."},
+
+    # Chat
+    "chat_mode":         {"label": "Chat mode", "group": "Chat", "advanced": False, "editable": True, "description": "agentic (tool loop) or single (single-shot)."},
+    "show_thinking":     {"label": "Show model thinking", "group": "Chat", "advanced": False, "editable": True, "description": "Stream reasoning_content when available."},
+    "setup_complete":    {"label": "Setup complete", "group": "Chat", "advanced": True, "editable": False, "description": "Whether first-run setup has been completed (managed)."},
+    "context_word_budget": {"label": "Context word budget", "group": "Chat", "min": 200, "max": 20000, "advanced": False, "editable": True, "description": "Total words of retrieved context sent to the LLM."},
+    "chunk_word_cap":    {"label": "Chunk word cap", "group": "Chat", "min": 50, "max": 2000, "advanced": False, "editable": True, "description": "Per-chunk word truncation for flat/child chunks."},
+    "history_char_budget": {"label": "History char budget", "group": "Chat", "min": 0, "max": 100000, "advanced": False, "editable": True, "description": "Max chat-history characters included."},
+    "history_msg_limit": {"label": "History message limit", "group": "Chat", "min": 0, "max": 100, "advanced": False, "editable": True, "description": "Max prior messages included."},
+
+    # Catalog
+    "catalog_enabled":   {"label": "Catalog / list mode", "group": "Catalog", "advanced": False, "editable": True, "description": "Enable deterministic list/catalog mode."},
+    "catalog_clarify_threshold": {"label": "Catalog clarify threshold", "group": "Catalog", "min": 1, "max": 1000, "advanced": False, "editable": True, "description": "Ambiguity threshold for list disambiguation."},
+    "catalog_max_rows":  {"label": "Catalog max rows", "group": "Catalog", "min": 10, "max": 5000, "advanced": False, "editable": True, "description": "Max rows in a rendered catalog table."},
+    "catalog_semantic_pool": {"label": "Catalog semantic pool", "group": "Catalog", "min": 10, "max": 5000, "advanced": False, "editable": True, "description": "BM25/dense pool size for catalog ranking."},
+
+    # Summary
+    "summary_strategy":  {"label": "Summary strategy", "group": "Summary", "advanced": False, "editable": True, "description": "map_reduce (deep) or single pass."},
+    "summary_max_chunks": {"label": "Summary max chunks", "group": "Summary", "min": 5, "max": 500, "advanced": False, "editable": True, "description": "Max chunks fed into a deep summary."},
+    "summary_context_budget": {"label": "Summary context budget", "group": "Summary", "min": 500, "max": 50000, "advanced": False, "editable": True, "description": "Context budget for summaries."},
+
+    # Quiz
+    "quiz_default_count": {"label": "Quiz default count", "group": "Quiz", "min": 1, "max": 100, "advanced": False, "editable": True, "description": "Default number of questions per quiz."},
+    "quiz_output_format": {"label": "Quiz output format", "group": "Quiz", "advanced": True, "editable": True, "description": "Default export format when /api/quiz/<id>/export is called with no 'format' param: markdown | gift | csv | json | apkg."},
+    "quiz_material_chunks": {"label": "Quiz material chunks", "group": "Quiz", "min": 1, "max": 100, "advanced": True, "editable": True, "description": "Max chunks of quiz material per prompt."},
+    "quiz_material_words": {"label": "Quiz material words", "group": "Quiz", "min": 10, "max": 5000, "advanced": True, "editable": True, "description": "Max words of quiz material per prompt."},
+    "quiz_depth":       {"label": "Quiz depth", "group": "Quiz", "advanced": True, "editable": True, "description": "Planner depth knob: surface | balanced | deep."},
+    "quiz_topic_max_works": {"label": "Quiz topic max works", "group": "Quiz", "min": 1, "max": 20, "advanced": True, "editable": True, "description": "Max works a topic plan ranks units across."},
+    "quiz_topic_section_pool": {"label": "Quiz topic section pool", "group": "Quiz", "min": 10, "max": 5000, "advanced": True, "editable": True, "description": "Section pool capped when cosine-ranking a topic plan."},
+    # Quiz generation + audit pipeline (SESSION 3)
+    "quiz_batch_parents": {"label": "Quiz batch parents", "group": "Quiz", "min": 1, "max": 50, "advanced": True, "editable": True, "description": "Parents sent per generation/verification batch."},
+    "quiz_parent_word_cap": {"label": "Quiz parent word cap", "group": "Quiz", "min": 100, "max": 5000, "advanced": True, "editable": True, "description": "Per-parent word cap when building generation material."},
+    "quiz_max_batches": {"label": "Quiz max batches", "group": "Quiz", "min": 1, "max": 200, "advanced": True, "editable": True, "description": "Max parent-batches per unit before giving up on the allocation."},
+    "quiz_verify_pass": {"label": "Quiz verify pass", "group": "Quiz", "advanced": True, "editable": True, "description": "Run the inline LLM answer-key verification stage (true/false)."},
+    "quiz_grounding_ratio": {"label": "Quiz grounding ratio", "group": "Quiz", "min": 0, "max": 1, "advanced": True, "editable": True, "description": "Min difflib ratio for an excerpt to be considered grounded in its parent."},
+    "quiz_dedupe_jaccard": {"label": "Quiz dedupe Jaccard", "group": "Quiz", "min": 0, "max": 1, "advanced": True, "editable": True, "description": "Stemmed-token Jaccard at/above which a question is dropped as a duplicate."},
+    "llm_structured_output": {"label": "LLM structured output", "group": "LLM", "advanced": True, "editable": True, "description": "Capability probe mode: auto | on | off for response_format json_schema."},
+    "quiz_grade_llm": {"label": "Quiz LLM grading", "group": "Quiz", "advanced": True, "editable": True, "description": "Use the LLM to grade short-answer questions (true/false)."},
+    "quiz_weak_threshold": {"label": "Quiz weak threshold", "group": "Quiz", "min": 0, "max": 1, "advanced": True, "editable": True, "description": "Unit accuracy below this is flagged as a weak area in analytics."},
+    "fsrs_enabled": {"label": "FSRS review loop", "group": "Quiz", "advanced": True, "editable": True, "description": "Enroll missed questions into the shared FSRS spaced-repetition review store (true/false)."},
+    "quiz_review_limit": {"label": "Review queue limit", "group": "Quiz", "min": 1, "max": 500, "advanced": True, "editable": True, "description": "Max due review cards returned by the review queue in one request."},
+
+    # Retrieval
+    "retrieval_top_k":   {"label": "Retrieval top-k", "group": "Retrieval", "min": 1, "max": 50, "advanced": False, "editable": True, "description": "Chunks surfaced in the prompt (capped 8)."},
+    "relevance_threshold": {"label": "Relevance threshold", "group": "Retrieval", "min": 0, "max": 1, "advanced": False, "editable": True, "description": "Low-relevance guard score floor."},
+    "max_retrieval_hops": {"label": "Retrieval hops", "group": "Retrieval", "min": 1, "max": 6, "advanced": False, "editable": True, "description": "Extra LLM-driven search rounds."},
+    "retrieval_hops_driver": {"label": "Retrieval hops driver", "group": "Retrieval", "advanced": False, "editable": True, "description": "How multi-hop retrieval is driven (llm)."},
+
+    # Rerank / hybrid (advanced, not in Setup UI)
+    "rerank_model":      {"label": "Reranker model", "group": "Advanced", "advanced": True, "editable": True, "description": "Cross-encoder model id used for re-scoring."},
+    "rerank_enabled":    {"label": "Rerank enabled", "group": "Advanced", "advanced": True, "editable": True, "description": "Enable cross-encoder reranking."},
+    "fuse_rrf_k":        {"label": "Fuse RRF k", "group": "Advanced", "min": 1, "max": 200, "advanced": True, "editable": True, "description": "RRF rank-fusion constant k (default 60)."},
+    "bm25_top_n":        {"label": "BM25 top n", "group": "Advanced", "min": 1, "max": 500, "advanced": True, "editable": True, "description": "BM25 hits to take as the lexical leg (default 30)."},
+    "bm25_batch":        {"label": "BM25 batch", "group": "Advanced", "min": 100, "max": 100000, "advanced": True, "editable": True, "description": "Rows per Chroma pagination when building BM25 (default 20000)."},
+    "bm25_min_coverage": {"label": "BM25 min coverage", "group": "Advanced", "min": 0, "max": 1, "advanced": True, "editable": True, "description": "Min hydrated coverage to trust persisted BM25 (default 0.9)."},
+    "rerank_top_n":      {"label": "Rerank top n", "group": "Advanced", "min": 1, "max": 500, "advanced": True, "editable": True, "description": "How many fused candidates the reranker keeps (default 24)."},
+    "max_chunks_per_title": {"label": "Max chunks per title", "group": "Advanced", "min": 1, "max": 50, "advanced": True, "editable": True, "description": "Cap on chunks kept per distinct title (default 3)."},
+    "dense_pool_multiplier": {"label": "Dense pool multiplier", "group": "Advanced", "min": 1, "max": 10, "advanced": True, "editable": True, "description": "Dense retrieval pool = top_k * this (default 3)."},
+    "fused_pool_floor":  {"label": "Fused pool floor", "group": "Advanced", "min": 1, "max": 500, "advanced": True, "editable": True, "description": "Lower bound on the fused RRF pool size (default 40)."},
+    "lexical_backend":   {"label": "Lexical backend", "group": "Advanced", "advanced": True, "editable": True, "description": "BM25 backend: auto / bm25_sqlite / bm25_chroma."},
+
+    # Fiction / OCR
+    "fiction_tags":      {"label": "Fiction tags", "group": "OCR", "advanced": False, "editable": True, "description": "Calibre tags treated as fiction (comma-separated)."},
+    "ocr_enabled":       {"label": "OCR enabled", "group": "OCR", "advanced": False, "editable": True, "description": "OCR scanned PDFs during ingest."},
+    "ocr_merge":         {"label": "OCR write-back", "group": "OCR", "advanced": False, "editable": True, "description": "Merge OCR text into the original PDF (true) or sidecar (false)."},
+    "ocr_backend":       {"label": "OCR backend", "group": "OCR", "advanced": False, "editable": True, "description": "OCR engine: tesseract or rapidocr."},
+    "ocr_char_threshold": {"label": "OCR char threshold", "group": "OCR", "min": 0, "max": 10000, "advanced": True, "editable": False, "description": "Min characters to consider a page OCR-able (managed)."},
+    "ocr_languages":     {"label": "OCR languages", "group": "OCR", "advanced": False, "editable": True, "description": "Comma-separated OCR language codes."},
+
+    # Managed
+    "sets":              {"label": "Sets", "group": "Managed", "advanced": True, "editable": False, "description": "Per-set ingest config (managed)."},
+}
+
+
+def _config_writable_keys() -> set:
+    """The set of config keys the POST /api/config allowlist accepts.
+
+    Derived from CONFIG_META so new keys can never drift out of sync: every
+    registered key that is editable (not a managed value) is writable.
+    """
+    return {k for k, m in CONFIG_META.items() if m.get("editable", True)}
 
 
 # ─── System / setup checks ───────────────────────────────────────────────────
@@ -711,30 +907,19 @@ def api_config_get():
     return jsonify(_public_cfg(load_cfg()))
 
 
+@app.route("/api/config/schema", methods=["GET"])
+def api_config_schema():
+    """Return the full {key: meta} registry for tools/agents to introspect."""
+    return jsonify(CONFIG_META)
+
+
 @app.route("/api/config", methods=["POST"])
 def api_config_set():
     data = request.get_json(force=True)
     cfg = load_cfg()
-    # Only allow whitelisted keys to update
-    allowed = {
-        "embed_model", "embed_device", "embed_dim", "chunk_tokens", "chunk_overlap",
-        "chunking_strategy", "parent_tokens",
-        "llm_base_url", "llm_model", "llm_api_key", "llm_temperature", "llm_max_tokens",
-        "max_tokens_default", "max_tokens_quiz", "max_tokens_summary",
-        "chat_mode", "show_thinking",
-        "context_word_budget", "chunk_word_cap",
-        "history_char_budget", "history_msg_limit",
-        "catalog_enabled", "catalog_clarify_threshold", "catalog_max_rows",
-        "catalog_semantic_pool",
-        "summary_strategy", "summary_max_chunks", "summary_context_budget",
-        "quiz_default_count", "quiz_output_format",
-        "retrieval_top_k", "relevance_threshold", "max_retrieval_hops",
-        "retrieval_hops_driver",
-        "rerank_model", "rerank_enabled",
-        "fiction_tags", "ocr_enabled", "ocr_languages",
-        "ocr_merge", "ocr_backend",
-        "ingest_batch_size",
-    }
+    # Only allow whitelisted keys to update; the allowlist is derived from the
+    # CONFIG_META registry so new keys can never drift out of sync.
+    allowed = _config_writable_keys()
     for k in allowed:
         if k in data:
             cfg[k] = data[k]
@@ -1489,10 +1674,640 @@ def _turn_meta(result):
         "relevance_reason": result.get("relevance_reason", ""),
     }
     for k in ("list_mode", "count", "shown", "truncated", "clarify",
-              "quiz_mode", "quiz_count"):
+              "quiz_mode", "quiz_count", "quiz_spec_proposal", "quiz_spec_id",
+              "quiz_spec_confirmed"):
         if k in result:
             meta[k] = result[k]
     return meta
+
+
+# ─── Quiz planning (SESSION 2) ───────────────────────────────────────────────
+#
+# The SESSION 2 planning layer: a deterministic section inventory + one cached
+# LLM outline pass (quiz_syllabus) and a planner (quiz_plan) that resolves
+# scope (work / sections / topic), applies a depth knob, allocates question
+# counts proportional to section length, and records out-of-scope refusals to
+# the ledger. No question generation happens yet (that is SESSION 3); these
+# endpoints only plan and persist an editable QuizSpec.
+
+def _set_name_from_request():
+    return (request.get_json(force=True, silent=True) or {}).get("set_name") or "veracrypt1"
+
+
+def _quiz_plan_collection(set_name):
+    """Return (collection, embedder) for planner topic ranking; None-guarded."""
+    try:
+        collection = get_chat_collection(set_name)
+    except SystemExit:
+        collection = None
+    embedder = None
+    if collection is not None and collection.count() > 0:
+        embedder = get_chat_embedder()
+    return collection, embedder
+
+
+@app.route("/api/quiz/plan", methods=["POST"])
+def api_quiz_plan():
+    """Resolve a quiz request (work / sections / topic) into an editable spec."""
+    data = request.get_json(force=True, silent=True) or {}
+    set_name = data.get("set_name") or _set_name_from_request()
+    cfg = load_cfg()
+    collection, embedder = _quiz_plan_collection(set_name)
+    try:
+        result = quiz_plan.plan_quiz(
+            data, set_name, cfg, embedder=embedder, collection=collection)
+    except Exception as e:
+        print(f"[quiz/plan] failed: {e}", flush=True)
+        return jsonify({"error": f"Quiz planning failed: {e}"}), 500
+    if "error" in result:
+        return jsonify({"error": result["error"]}), 400
+    return jsonify(result)
+
+
+@app.route("/api/quiz/plan/revise", methods=["POST"])
+def api_quiz_plan_revise():
+    """Apply conversational edits to a stored quiz spec (include/exclude/count…)."""
+    data = request.get_json(force=True, silent=True) or {}
+    spec_id = data.get("spec_id") or (data.get("spec") or {}).get("id")
+    spec = data.get("spec")
+    if spec is None and spec_id:
+        spec = quiz_store.get_spec(spec_id)
+    if not spec:
+        return jsonify({"error": "No spec provided."}), 400
+    deltas = data.get("deltas") or data
+    try:
+        result = quiz_plan.revise_spec(spec, deltas)
+    except Exception as e:
+        print(f"[quiz/plan/revise] failed: {e}", flush=True)
+        return jsonify({"error": f"Spec revision failed: {e}"}), 500
+    if "error" in result:
+        return jsonify({"error": result["error"]}), 400
+    return jsonify(result)
+
+
+@app.route("/api/quiz/syllabus", methods=["POST"])
+def api_quiz_syllabus():
+    """Build/return a work's cached syllabus (for the Study-tab builder)."""
+    data = request.get_json(force=True, silent=True) or {}
+    set_name = data.get("set_name") or "veracrypt1"
+    title = (data.get("work") or data.get("title") or "").strip()
+    if not title:
+        return jsonify({"error": "No work title provided."}), 400
+    cfg = load_cfg()
+    try:
+        syllabus = quiz_syllabus.get_syllabus(
+            title, set_name, cfg, get_chat_client())
+    except Exception as e:
+        print(f"[quiz/syllabus] failed: {e}", flush=True)
+        return jsonify({"error": f"Syllabus failed: {e}"}), 500
+    return jsonify(syllabus)
+
+
+@app.route("/api/quiz/specs", methods=["GET"])
+def api_quiz_specs():
+    set_name = request.args.get("set_name") or "veracrypt1"
+    return jsonify({"specs": quiz_store.list_specs(set_name)})
+
+
+@app.route("/api/quiz/spec/<spec_id>", methods=["GET"])
+def api_quiz_spec_get(spec_id):
+    spec = quiz_store.get_spec(spec_id)
+    if not spec:
+        return jsonify({"error": "Spec not found."}), 404
+    return jsonify(spec)
+
+
+@app.route("/api/quiz/spec/<spec_id>", methods=["DELETE"])
+def api_quiz_spec_delete(spec_id):
+    quiz_store.delete_spec(spec_id)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/quiz/out-of-scope", methods=["GET"])
+def api_quiz_out_of_scope():
+    return jsonify({"entries": quiz_store.read_out_of_scope()})
+
+
+@app.route("/api/quiz/books", methods=["GET"])
+def api_quiz_books():
+    """List the works in a set (titles) for the Study-tab work picker."""
+    set_name = request.args.get("set_name") or "veracrypt1"
+    collection = None
+    try:
+        collection = get_chat_collection(set_name)
+    except SystemExit:
+        pass
+    if collection is None or collection.count() == 0:
+        return jsonify({"books": []})
+    books = CAT.list_books(set_name, collection)
+    return jsonify({"books": [{"title": b["title"], "kind": b.get("kind", "")}
+                               for b in books if b.get("title")]})
+
+
+# ─── Quiz generation pipeline (SESSION 3) ───────────────────────────────────
+#
+# Work-specific generation: material comes from an ordered walk of the
+# `parents` table (never semantic search). Each batch is generated and put
+# through the 4-stage audit (scripts/quiz_audit.py) — parse sanity, grounding
+# against the real parent text, inline LLM answer-key verification, and cross-
+# batch dedupe — with drop + top-up. The build runs in a worker thread and
+# streams SSE ``progress`` (heartbeat per unit) and ``delta`` ({type: unit}/
+# {type: done}) events via a queue, mirroring the chat stream pattern.
+# Generation is blocked while an ingest is running (same reason as /api/chat:
+# avoid ChromaDB concurrent read/write errors).
+
+@app.route("/api/quiz/generate", methods=["POST"])
+def api_quiz_generate():
+    """Generate a quiz from a persisted QuizSpec. SSE progress events."""
+    if ingest_active():
+        return jsonify({"error": "An ingest is running; wait for it to finish "
+                                 "before generating a quiz."}), 409
+    data = request.get_json(force=True, silent=True) or {}
+    set_name = data.get("set_name") or "veracrypt1"
+    spec_id = data.get("spec_id")
+    spec = data.get("spec")
+    if spec is None and spec_id:
+        spec = quiz_store.get_spec(spec_id)
+    if not spec:
+        return jsonify({"error": "No spec provided."}), 400
+    cfg = load_cfg()
+    return Response(
+        _quiz_generate_sse(set_name, spec, cfg),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache",
+                 "X-Accel-Buffering": "no"},
+    )
+
+
+def _quiz_generate_sse(set_name, spec, cfg):
+    import json as _json
+    import queue as _queue
+    evq = _queue.Queue()
+
+    def _worker():
+        try:
+            result = quiz_build.build_quiz(
+                spec, set_name, cfg, get_chat_client(),
+                stream_cb=lambda ev: evq.put(("delta", ev)),
+                progress_cb=lambda msg: evq.put(("progress", {"message": msg})),
+                collection=get_chat_collection(set_name),
+                embedder=get_chat_embedder(),
+            )
+            evq.put(("done", result))
+        except SystemExit:
+            evq.put(("error", "Collection not available for this set."))
+        except Exception as e:
+            print(f"[quiz/generate] failed: {e}", flush=True)
+            evq.put(("error", str(e)))
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+    while True:
+        kind, payload = evq.get()
+        if kind == "progress":
+            yield "event: progress\ndata: " + _json.dumps(payload) + "\n\n"
+        elif kind == "delta":
+            # Follow the chat deltas convention: a top-level object.
+            yield "event: delta\ndata: " + _json.dumps({"wave": payload}) + "\n\n"
+        elif kind == "error":
+            yield "event: error\ndata: " + _json.dumps({"error": payload}) + "\n\n"
+            return
+        elif kind == "done":
+            yield "event: done\ndata: " + _json.dumps(payload) + "\n\n"
+            return
+
+
+@app.route("/api/quizzes", methods=["GET"])
+def api_quizzes_list():
+    """List generated quizzes (status, counts) for the Study tab."""
+    set_name = request.args.get("set_name") or "veracrypt1"
+    return jsonify({"quizzes": quiz_store.list_quizzes(set_name)})
+
+
+@app.route("/api/quiz/<quiz_id>", methods=["GET"])
+def api_quiz_get(quiz_id):
+    quiz = quiz_store.get_quiz(quiz_id)
+    if not quiz:
+        return jsonify({"error": "Quiz not found."}), 404
+    return jsonify(quiz)
+
+
+@app.route("/api/quiz/<quiz_id>/export", methods=["GET"])
+def api_quiz_export(quiz_id):
+    """Export a stored quiz in a portable format (markdown|gift|csv|json|apkg).
+
+    Wires the `quiz_output_format` config key as the default when no
+    ``format`` query param is given (SESSION 6)."""
+    quiz = quiz_store.get_quiz(quiz_id)
+    if not quiz:
+        return jsonify({"error": "Quiz not found."}), 404
+    fmt = request.args.get("format") or str(
+        load_cfg().get("quiz_output_format", "markdown") or "markdown")
+    try:
+        payload, mime, is_binary = quiz_export.export_quiz(quiz, fmt)
+    except ImportError as e:
+        return jsonify({"error": str(e)}), 400
+    fname = f"quiz-{quiz.get('id', quiz_id)}.{'apkg' if fmt == 'apkg' else 'gift' if fmt == 'gift' else 'csv' if fmt == 'csv' else 'json' if fmt == 'json' else 'md'}"
+    return Response(payload, mimetype=mime,
+                    headers={"Content-Disposition":
+                             f'attachment; filename="{fname}"'})
+
+
+@app.route("/api/quiz/<quiz_id>", methods=["DELETE"])
+def api_quiz_delete(quiz_id):
+    quiz_store.delete_quiz(quiz_id)
+    return jsonify({"ok": True})
+
+
+# ─── Quiz player, grading & analytics (SESSION 4) ────────────────────────────
+#
+# The Study-tab player takes a stored quiz one question at a time. Grading is
+# deterministic for mcq / true_false / fill_blank and LLM-assisted for
+# short_answer (scripts/quiz_grade.py), using only each question's own
+# provenance excerpt. Attempts (answers, scores, timestamps) are persisted
+# INSIDE the quiz file under quiz["attempts"] so an interrupted session is not
+# lost and the result survives a server restart. Analytics aggregate per-unit /
+# per-difficulty / per-type accuracy and provenance-linked study points.
+
+def _quiz_attempt_id():
+    import uuid as _uuid
+    return _uuid.uuid4().hex[:12]
+
+
+def _strip_answers(question):
+    """Return a question for the player WITHOUT revealing the answer."""
+    q = dict(question)
+    q.pop("answer", None)
+    return q
+
+
+@app.route("/api/quiz/<quiz_id>/attempt", methods=["POST"])
+def api_quiz_attempt(quiz_id):
+    """Start a quiz attempt: register it and return the questions sans answers."""
+    quiz = quiz_store.get_quiz(quiz_id)
+    if not quiz:
+        return jsonify({"error": "Quiz not found."}), 404
+    questions = [q for q in (quiz.get("questions") or []) if q.get("q")]
+    if not questions:
+        return jsonify({"error": "This quiz has no questions."}), 400
+    attempt_id = _quiz_attempt_id()
+    attempts = quiz.setdefault("attempts", [])
+    attempts.append({
+        "attempt_id": attempt_id,
+        "started": int(time.time()),
+        "grades": {},
+        "finished": False,
+        "analytics": None,
+    })
+    quiz_store.update_quiz(quiz)
+    return jsonify({
+        "attempt_id": attempt_id,
+        "total": len(questions),
+        "questions": [_strip_answers(q) for q in questions],
+    })
+
+
+@app.route("/api/quiz/<quiz_id>/answer", methods=["POST"])
+def api_quiz_answer(quiz_id):
+    """Grade a single answer and store it in the current attempt."""
+    quiz = quiz_store.get_quiz(quiz_id)
+    if not quiz:
+        return jsonify({"error": "Quiz not found."}), 404
+    data = request.get_json(force=True, silent=True) or {}
+    attempt_id = data.get("attempt_id")
+    qid = str(data.get("qid"))
+    response = data.get("response")
+    if not attempt_id or qid is None:
+        return jsonify({"error": "attempt_id and qid are required."}), 400
+    attempts = quiz.get("attempts") or []
+    attempt = next((a for a in attempts if a.get("attempt_id") == attempt_id), None)
+    if not attempt:
+        return jsonify({"error": "Attempt not found."}), 404
+    question = next((q for q in (quiz.get("questions") or [])
+                     if str(q.get("qid")) == qid), None)
+    if not question:
+        return jsonify({"error": "Question not found."}), 404
+    cfg = load_cfg()
+    graded = quiz_grade.grade_answer(question, response, cfg, get_chat_client())
+    if graded is None:
+        return jsonify({"error": "Could not grade this answer."}), 400
+    attempt.setdefault("grades", {})[qid] = {
+        "response": response,
+        "correct": graded["correct"],
+        "expected": graded["expected"],
+        "feedback": graded["feedback"],
+        "score": graded["score"],
+        "ts": int(time.time()),
+    }
+    quiz_store.update_quiz(quiz)
+    return jsonify({
+        "correct": graded["correct"],
+        "expected": graded["expected"],
+        "feedback": graded["feedback"],
+        "score": graded["score"],
+    })
+
+
+@app.route("/api/quiz/<quiz_id>/finish", methods=["POST"])
+def api_quiz_finish(quiz_id):
+    """Finish an attempt: compute analytics and persist the attempt."""
+    quiz = quiz_store.get_quiz(quiz_id)
+    if not quiz:
+        return jsonify({"error": "Quiz not found."}), 404
+    data = request.get_json(force=True, silent=True) or {}
+    attempt_id = data.get("attempt_id")
+    if not attempt_id:
+        return jsonify({"error": "attempt_id is required."}), 400
+    attempts = quiz.get("attempts") or []
+    attempt = next((a for a in attempts if a.get("attempt_id") == attempt_id), None)
+    if not attempt:
+        return jsonify({"error": "Attempt not found."}), 404
+    analytics = quiz_grade.compute_analytics(
+        attempt.get("grades") or {}, quiz.get("questions") or [],
+        weak_threshold=cfg_float(load_cfg(), "quiz_weak_threshold", 0.6, 0, 1))
+    # Enroll missed questions into the FSRS review store (SESSION 5) so they
+    # resurface on a spaced-repetition schedule in the Review pane. Gated by
+    # the fsrs_enabled config key; idempotent per (quiz_id, qid).
+    enrolled = 0
+    if load_cfg().get("fsrs_enabled", True):
+        # Mirror quiz_grade.enumerate_all's qid rule (qid else array index) so
+        # study points line back up even for legacy questions without a qid.
+        by_qid = {str(q.get("qid") or i): q
+                  for i, q in enumerate(quiz.get("questions") or [])}
+        for sp in analytics.get("study_points") or []:
+            qid = str(sp.get("qid"))
+            q = by_qid.get(qid)
+            if q and quiz_store.enroll_review_question(
+                    quiz_id, quiz.get("set_name") or "", qid, q,
+                    already_correct=False):
+                enrolled += 1
+    attempt["finished"] = True
+    attempt["analytics"] = analytics
+    attempt["finished_at"] = int(time.time())
+    quiz_store.update_quiz(quiz)
+    return jsonify({"analytics": analytics, "enrolled_to_review": enrolled})
+
+
+@app.route("/api/quiz/<quiz_id>/analytics", methods=["GET"])
+def api_quiz_analytics(quiz_id):
+    """Return the analytics for a finished attempt (latest by default)."""
+    quiz = quiz_store.get_quiz(quiz_id)
+    if not quiz:
+        return jsonify({"error": "Quiz not found."}), 404
+    attempt_id = request.args.get("attempt_id")
+    attempts = [a for a in (quiz.get("attempts") or [])
+                if a.get("finished") and a.get("analytics")]
+    if not attempts:
+        return jsonify({"analytics": None})
+    if attempt_id:
+        hit = next((a for a in attempts if a.get("attempt_id") == attempt_id), None)
+        if hit:
+            return jsonify({"analytics": hit["analytics"]})
+        return jsonify({"analytics": None})
+    last = sorted(attempts, key=lambda a: a.get("finished_at", 0)).pop()
+    return jsonify({"analytics": last["analytics"]})
+
+
+# ─── FSRS review loop (SESSION 5) ────────────────────────────────────────────
+#
+# Missed questions are enrolled into a single shared review store
+# (quizzes/review.json, keyed by quiz_id:qid) at attempt finish so the
+# due-today queue spans quizzes. The Review pane pulls cards from
+# GET /api/review/queue, applies an FSRS rating via
+# POST /api/review/<quiz_id>/<qid>, and shows counts + strength-over-time via
+# GET /api/review/stats. Scheduling is computed by py-fsrs with UTC now.
+
+@app.route("/api/review/queue", methods=["GET"])
+def api_review_queue():
+    """Due review cards across quizzes (question + provenance), oldest-due
+    first, for one set."""
+    set_name = request.args.get("set") or request.args.get("set_name") or "veracrypt1"
+    limit = cfg_int(load_cfg(), "quiz_review_limit", 50, 1, 500)
+    cards = quiz_store.fetch_due_reviews(set_name=set_name, limit=limit)
+    out = []
+    for c in cards:
+        question = c.get("question") or {}
+        prov = question.get("provenance") or {}
+        out.append({
+            "key": c.get("key"),
+            "quiz_id": c.get("quiz_id"),
+            "qid": c.get("qid"),
+            "set_name": c.get("set_name"),
+            "type": c.get("type") or question.get("type") or "mcq",
+            "question": question.get("q") or "",
+            "choices": question.get("choices") or [],
+            "answer": question.get("answer") or "",
+            "section_title": prov.get("section_title") or "",
+            "excerpt": (prov.get("excerpt_snippet") or "")[:400],
+            "difficulty": question.get("difficulty") or "",
+            "due": (c.get("fsrs") or {}).get("due"),
+            "last_rating": c.get("last_rating"),
+            "reviews": len(c.get("history") or []),
+        })
+    return jsonify({"cards": out, "count": len(out)})
+
+
+@app.route("/api/review/<quiz_id>/<qid>", methods=["POST"])
+def api_review_rating(quiz_id, qid):
+    """Apply an FSRS rating (again|hard|good|easy) to a stored review card."""
+    if not load_cfg().get("fsrs_enabled", True):
+        return jsonify({"error": "FSRS review is disabled in config."}), 400
+    data = request.get_json(force=True, silent=True) or {}
+    rating = data.get("rating") or request.form.get("rating")
+    card = quiz_store.record_review_rating(quiz_id, qid, rating)
+    if card is None:
+        if rating not in ("again", "hard", "good", "easy"):
+            return jsonify({"error": "Rating must be again|hard|good|easy."}), 400
+        return jsonify({"error": "Review card not found (or FSRS unavailable)."}), 404
+    history = card.get("history") or []
+    last = history[-1] if history else {}
+    return jsonify({
+        "ok": True,
+        "rating": rating,
+        "due": (card.get("fsrs") or {}).get("due"),
+        "stability": last.get("stability"),
+        "last_rating": card.get("last_rating"),
+    })
+
+
+@app.route("/api/review/stats", methods=["GET"])
+def api_review_stats():
+    """Review counts, retention rate, and a strength-over-time series."""
+    set_name = request.args.get("set") or request.args.get("set_name") or "veracrypt1"
+    return jsonify(quiz_store.fetch_review_stats(set_name))
+
+
+@app.route("/api/review/summary", methods=["GET"])
+def api_review_summary():
+    """Per-quiz due counts (for the due badge on the generated-quiz list)."""
+    set_name = request.args.get("set") or request.args.get("set_name") or "veracrypt1"
+    cards = quiz_store.fetch_due_reviews(set_name=set_name, limit=100000)
+    counts = {}
+    for c in cards:
+        qid = c.get("quiz_id")
+        counts[qid] = counts.get(qid, 0) + 1
+    return jsonify({"due": counts})
+
+
+# ─── Course view (SESSION 6) ─────────────────────────────────────────────────
+#
+# Surfaces the SESSION 2 syllabus artifact as a browsable course: a work's unit
+# list with reading summaries (whole-work via catalog.map_reduce_summary, or a
+# per-unit LLM summary over that unit's parents) and a per-unit "quiz this unit"
+# action that plans a sections-scope spec. Simple unit progress is derived from
+# stored quizzes (how many of the work's units have generated questions).
+
+def _course_quizzed_counts(set_name, work):
+    """Return {normalized unit_title: count} of generated-quiz questions that
+    cite this work, so the course can mark units as "quizzed"."""
+    import re as _re
+    counts = {}
+    norm = lambda s: _re.sub(r"[^a-z0-9]+", "", (s or "").strip().lower())
+    for q in quiz_store.list_quizzes(set_name):
+        for qu in (q.get("questions") or []):
+            prov = qu.get("provenance") or {}
+            if prov.get("title") and norm(work) and \
+               (norm(prov["title"]) in norm(work) or norm(work) in norm(prov["title"])):
+                key = qu.get("section_title") or prov.get("section_title") or ""
+                if key:
+                    counts[norm(key)] = counts.get(norm(key), 0) + 1
+    return counts
+
+
+@app.route("/api/course", methods=["GET"])
+def api_course():
+    """Course/syllabus browser for one work: its unit list (with word counts)
+    and a ``quizzed`` flag per unit derived from stored quizzes."""
+    set_name = request.args.get("set") or request.args.get("set_name") or "veracrypt1"
+    work = (request.args.get("work") or "").strip()
+    if not work:
+        return jsonify({"error": "a work title is required"}), 400
+    syllabus = quiz_syllabus.get_syllabus(work, set_name)
+    units = syllabus.get("units") or []
+    counts = _course_quizzed_counts(set_name, work)
+    norm = lambda s: __import__("re").sub(
+        r"[^a-z0-9]+", "", (s or "").strip().lower())
+    out_units = []
+    for u in units:
+        quizzed = bool(counts.get(norm(u.get("title"))))
+        out_units.append({
+            "unit_id": u.get("unit_id"),
+            "title": u.get("title"),
+            "ordinal": u.get("ordinal"),
+            "parent_ids": u.get("parent_ids") or [],
+            "subtopics": u.get("subtopics") or [],
+            "words": u.get("words") or 0,
+            "quizzed": quizzed,
+        })
+    return jsonify({
+        "title": work, "set_name": set_name,
+        "units": out_units,
+        "unit_count": len(out_units),
+        "quizzed_count": sum(1 for u in out_units if u["quizzed"]),
+        "warnings": syllabus.get("warnings") or [],
+    })
+
+
+@app.route("/api/course/summary", methods=["POST"])
+def api_course_summary():
+    """Whole-work deep reading summary via catalog.map_reduce_summary."""
+    data = request.get_json(force=True, silent=True) or {}
+    set_name = data.get("set_name") or "veracrypt1"
+    work = (data.get("work") or "").strip()
+    if not work:
+        return jsonify({"error": "a work title is required"}), 400
+    try:
+        collection = get_chat_collection(set_name)
+        if collection.count() == 0:
+            return jsonify({"error": "no collection available"}), 400
+        import agent as _a
+        matched = _a._match_titles(work, set_name, limit=4)
+        if not matched:
+            return jsonify({"error": f"no work matching {work!r}"}), 404
+        summary = map_reduce_summary(
+            set_name, matched, load_cfg(), collection, get_chat_embedder(),
+            get_chat_client())
+        return jsonify({"work": work, "set_name": set_name,
+                        "matched": matched, "summary": summary})
+    except SystemExit:
+        return jsonify({"error": "collection unavailable"}), 400
+    except Exception as e:
+        print(f"[course] summary failed: {e}", flush=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/course/unit-summary", methods=["POST"])
+def api_course_unit_summary():
+    """Short per-unit reading summary over that unit's parents via an LLM call."""
+    data = request.get_json(force=True, silent=True) or {}
+    set_name = data.get("set_name") or "veracrypt1"
+    work = (data.get("work") or "").strip()
+    unit_id = (data.get("unit_id") or "").strip()
+    if not work or not unit_id:
+        return jsonify({"error": "work and unit_id are required"}), 400
+    syllabus = quiz_syllabus.get_syllabus(work, set_name)
+    unit = next((u for u in (syllabus.get("units") or [])
+                 if u.get("unit_id") == unit_id), None)
+    if not unit:
+        return jsonify({"error": "unit not found"}), 404
+    parent_ids = unit.get("parent_ids") or []
+    import agent as _a
+    texts = _a._load_parent_texts(parent_ids, set_name) if parent_ids else {}
+    parts = []
+    for pid in parent_ids:
+        p = texts.get(pid)
+        if p:
+            parts.append(" ".join((p.get("text") or "").split())[:900])
+    if not parts:
+        return jsonify({"error": "no parent text for this unit"}), 404
+    cfg = load_cfg()
+    prompt = (
+        f"Write a concise reading summary (2-4 sentences) of the chapter/section "
+        f"\"{unit.get('title')}\" of \"{work}\", covering its main points.\n\n"
+        f"--- Section text ---\n\n" + "\n\n".join(parts))
+    try:
+        resp = get_chat_client().chat.completions.create(
+            model=cfg.get("llm_model", "default"),
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+            max_tokens=int(cfg.get("max_tokens_summary", 4096) or 4096),
+        )
+        text = (resp.choices[0].message.content or "").strip()
+    except Exception as e:
+        print(f"[course] unit summary failed: {e}", flush=True)
+        return jsonify({"error": str(e)}), 500
+    return jsonify({"work": work, "unit_id": unit_id,
+                    "title": unit.get("title"), "summary": text})
+
+
+@app.route("/api/course/quiz-unit", methods=["POST"])
+def api_course_quiz_unit():
+    """Plan (and persist) a sections-scope spec for a single unit, so the UI can
+    jump straight to generating a quiz on that unit."""
+    data = request.get_json(force=True, silent=True) or {}
+    set_name = data.get("set_name") or "veracrypt1"
+    work = (data.get("work") or "").strip()
+    unit_id = (data.get("unit_id") or "").strip()
+    count = int(data.get("count") or 10)
+    if not work or not unit_id:
+        return jsonify({"error": "work and unit_id are required"}), 400
+    try:
+        collection = get_chat_collection(set_name)
+        plan = quiz_plan.plan_quiz(
+            {"mode": "sections", "work": work, "unit_ids": [unit_id],
+             "count": count}, set_name, load_cfg(),
+            embedder=get_chat_embedder(), collection=collection)
+    except SystemExit:
+        return jsonify({"error": "collection unavailable"}), 400
+    except Exception as e:
+        print(f"[course] quiz-unit plan failed: {e}", flush=True)
+        return jsonify({"error": str(e)}), 500
+    if "error" in plan:
+        return jsonify({"error": plan["error"]}), 400
+    spec = plan["spec"]
+    if not spec.get("id"):
+        spec = quiz_store.create_spec(spec)
+    return jsonify({"spec": spec})
 
 
 # ─── Quiz / study mode ───────────────────────────────────────────────────────
@@ -1506,21 +2321,167 @@ def _turn_meta(result):
 # (e.g. an 8k-token ~2B GGUF). Gathering many long chunks (24 × 300 words ≈
 # 11k tokens) makes every quiz generation blow the context window. These are
 # tuned so the prompt plus the generation template stays well under 8k even
-# with system/tools overhead.
+# with system/tools overhead. These are now config keys (quiz_material_chunks /
+# quiz_material_words, default 10 / 140) consolidated across server.py,
+# agent_loop.py and mcp_server.py.
 QUIZ_MATERIAL_CHUNKS = 10
 QUIZ_MATERIAL_WORDS = 140
+
+
+def _persist_pending_quiz_spec(conv_id, spec):
+    """Persist a quiz-spec proposal for conversational revision (SESSION 6)."""
+    if not conv_id:
+        return
+    chat_store.set_pending_quiz_spec(conv_id, spec)
+
+
+def _clear_pending_quiz_spec(conv_id):
+    if conv_id:
+        chat_store.set_pending_quiz_spec(conv_id, None)
+
+
+def _spec_proposal_body(spec, set_name, action="planned"):
+    """Render a spec proposal with numbered options for the chat reply."""
+    units = spec.get("units") or []
+    title = spec.get("title") or ""
+    head = f"### 🧠 Quiz plan"
+    if title:
+        head += f" — {title}"
+    head += f"  (set: {set_name})\n\n"
+    body = (head + f"Here's a proposal for a **{spec.get('count')}-question** "
+            f"quiz ({spec.get('mode')} · {spec.get('depth')}).\n\n")
+    for i, u in enumerate(units, 1):
+        body += f"**{i}. {u.get('title')}** — {u.get('allocation')} question(s)\n"
+    for w in (spec.get("warnings") or [])[:4]:
+        body += f"\n> ⚠ {w}"
+    body += ("\n\nReply to adjust, e.g. **\"drop unit 1\"**, **\"double unit 2\"**, "
+             "**\"make it 30 questions\"**, **\"harder\"**, **\"deep\"**, or "
+             "**\"build it\"** to generate.")
+    return body
+
+
+def _quiz_spec_proposal(set_name, topic, count, cfg, conv_id, filter_kind=None):
+    """Build a QuizSpec proposal for a quiz request and stash it as the
+    conversation's pending_quiz_spec. Returns a result dict (``quiz_mode`` +
+    ``quiz_spec_proposal``) or None if no collection/plan is available."""
+    try:
+        collection = get_chat_collection(set_name)
+        if collection.count() == 0:
+            return None
+        plan = quiz_plan.plan_quiz(
+            {"mode": "topic", "topic": topic, "count": count,
+             "difficulty": "mixed"}, set_name, cfg,
+            embedder=get_chat_embedder(), collection=collection)
+    except SystemExit:
+        return None
+    except Exception as e:
+        print(f"[quiz] spec proposal failed: {e}", flush=True)
+        return None
+    if "error" in plan or plan.get("out_of_scope"):
+        return {
+            "answer": (f"### 🧠 Quiz\n\nCould not plan a quiz on **{topic}**: "
+                       f"{plan.get('error') or plan.get('refusal')}"),
+            "sources": [], "quiz_mode": True, "quiz_count": 0,
+            "fiction_only": False, "low_relevance": False,
+            "relevance_reason": "",
+        }
+    spec = plan["spec"]
+    if not spec.get("id"):
+        spec = quiz_store.create_spec(spec)
+    else:
+        persisted = quiz_store.get_spec(spec.get("id"))
+        if persisted:
+            spec = persisted
+    _persist_pending_quiz_spec(conv_id, spec)
+    return {
+        "answer": _spec_proposal_body(spec, set_name),
+        "sources": [], "quiz_mode": True, "quiz_count": spec.get("count", count),
+        "quiz_spec_proposal": True, "quiz_spec_id": spec.get("id"),
+        "fiction_only": False, "low_relevance": False, "relevance_reason": "",
+    }
+
+
+def _resolve_pending_spec_delta(conv_id, query):
+    """If this conversation has a pending_quiz_spec proposal and the query
+    reads as an adjustment to it, apply quiz_plan.revise_spec and return a
+    result dict. Returns None when there is no applicable pending spec."""
+    if not conv_id:
+        return None
+    pending = chat_store.get_pending_quiz_spec(conv_id)
+    if not pending:
+        return None
+    q = (query or "").strip().lower()
+    if not q:
+        return None
+    # A plain "build it / generate / go" confirms the pending spec.
+    if re.search(r"\b(build|generate|go ahead|make it now|yes|yep|confirm)\b", q):
+        return {"confirm": True, "spec": pending,
+                "answer": ("Proceeding to build the pending quiz. "
+                           "Open the Study tab's Generated quizzes to run it."),
+                "sources": [], "quiz_mode": True, "quiz_count": 0,
+                "quiz_spec_confirmed": True, "fiction_only": False,
+                "low_relevance": False, "relevance_reason": ""}
+    # Detect explicit adjustment keywords; without them fall through.
+    if not re.search(r"\b(unit|units|drop|exclude|remove|add|include|double|"
+                     r"half|more|fewer|questions?|harder|easier|deep|surface|"
+                     r"balanced|difficulty|count|make it|\d+)\b", q):
+        return None
+    deltas = {}
+    # count: "make it N questions" / "N questions"
+    m = re.search(r"\b(\d+)\s*(questions?|q)\b", q)
+    if m and not re.search(r"\bunit", q):
+        deltas["count"] = int(m.group(1))
+    # difficulty
+    if re.search(r"\bharder\b", q):
+        deltas["difficulty"] = "hard"
+    elif re.search(r"\beasier\b", q):
+        deltas["difficulty"] = "easy"
+    # depth
+    for depth in ("deep", "surface", "balanced"):
+        if re.search(rf"\b{depth}\b", q):
+            deltas["depth"] = depth
+            break
+    if not deltas:
+        return None
+    result = quiz_plan.revise_spec(pending, deltas)
+    spec = (result or {}).get("spec") or pending
+    _persist_pending_quiz_spec(conv_id, spec)
+    return {
+        "answer": _spec_proposal_body(spec, spec.get("set_name") or "veracrypt1",
+                                      action="revised"),
+        "sources": [], "quiz_mode": True,
+        "quiz_count": spec.get("count", 0), "quiz_spec_proposal": True,
+        "quiz_spec_id": spec.get("id"), "fiction_only": False,
+        "low_relevance": False, "relevance_reason": "",
+    }
 
 
 def maybe_quiz(set_name, query, conv_id=None, filter_kind=None):
     """Handle a quiz/test request. Returns a result dict (with ``quiz_mode``)
     or ``None`` when the query is not a quiz request."""
     cfg = load_cfg()
+    mc = cfg_int(cfg, "quiz_material_chunks", QUIZ_MATERIAL_CHUNKS, 1, 100)
+    mw = cfg_int(cfg, "quiz_material_words", QUIZ_MATERIAL_WORDS, 10, 5000)
     if not CAT.is_quiz_intent(query):
         return None
 
     topic = CAT.extract_topic(query) or ""
     count = CAT.extract_count(query, int(cfg.get("quiz_default_count", 10) or 10))
     fk = CAT.extract_filter_kind(query) or filter_kind
+
+    # SESSION 6 conversational negotiation: for a larger quiz request (or one
+    # that names a work and wants a reviewable quiz) we route through the
+    # planner to produce an editable spec proposal with numbered options,
+    # stored as pending_quiz_spec so follow-up messages can revise it. Small
+    # requests keep the fast inline quiz (no regression).
+    propose = count > int(cfg.get("quiz_default_count", 10) or 10) or \
+        bool(re.search(r"\b(plan|build|save|long|big|review(able)?)\b",
+                       query or "", re.IGNORECASE))
+    if propose:
+        proposal = _quiz_spec_proposal(set_name, topic, count, cfg, conv_id,
+                                       fk)
+        if proposal is not None:
+            return proposal
 
     try:
         collection = get_chat_collection(set_name)
@@ -1537,12 +2498,12 @@ def maybe_quiz(set_name, query, conv_id=None, filter_kind=None):
         where = {"title": {"$in": matched}}
         try:
             hits = _agent_mod.retrieve(", ".join(matched), embedder, collection,
-                                       top_k=QUIZ_MATERIAL_CHUNKS, cfg=cfg,
+                                       top_k=mc, cfg=cfg,
                                        where_extra=where)
         except Exception:
             hits = []
-        material = _agent_mod.build_context(hits[:QUIZ_MATERIAL_CHUNKS],
-                                            max_words=QUIZ_MATERIAL_WORDS)
+        material = _agent_mod.build_context(hits[:mc],
+                                            max_words=mw)
     else:
         books = CAT.find_books(topic, set_name, fk, cfg,
                                collection=collection, embedder=embedder)
@@ -1551,12 +2512,12 @@ def maybe_quiz(set_name, query, conv_id=None, filter_kind=None):
             where = {"title": {"$in": titles}}
             try:
                 hits = _agent_mod.retrieve(topic, embedder, collection,
-                                           top_k=QUIZ_MATERIAL_CHUNKS, cfg=cfg,
+                                           top_k=mc, cfg=cfg,
                                            where_extra=where)
             except Exception:
                 hits = []
-            material = _agent_mod.build_context(hits[:QUIZ_MATERIAL_CHUNKS],
-                                                max_words=QUIZ_MATERIAL_WORDS)
+            material = _agent_mod.build_context(hits[:mc],
+                                                max_words=mw)
 
     if not material:
         return {"answer": (f"### 🧠 Quiz\n\nNo material was found to quiz you "
@@ -1813,6 +2774,13 @@ def api_chat():
             chat_store.add_message(conv_id, "assistant", quiz.get("answer", ""),
                                    _turn_meta(quiz))
         return jsonify(quiz), 200
+    delta = _resolve_pending_spec_delta(conv_id, query)
+    if delta is not None:
+        if conv_id and "error" not in delta:
+            chat_store.add_message(conv_id, "user", query)
+            chat_store.add_message(conv_id, "assistant", delta.get("answer", ""),
+                                   _turn_meta(delta))
+        return jsonify(delta), 200
     cat = maybe_catalog(set_name, query, conv_id, filter_kind)
     if cat is not None:
         if conv_id and "error" not in cat:
@@ -1876,6 +2844,14 @@ def _stream_sse(set_name, query, top_k, filter_kind, history, conv_id):
         yield "event: delta\ndata: " + _json.dumps(text) + "\n\n"
         yield "event: done\ndata: " + _json.dumps(quiz) + "\n\n"
         _persist_chat(conv_id, query, quiz)
+        return
+
+    delta = _resolve_pending_spec_delta(conv_id, query)
+    if delta is not None:
+        text = delta.get("answer", "")
+        yield "event: delta\ndata: " + _json.dumps(text) + "\n\n"
+        yield "event: done\ndata: " + _json.dumps(delta) + "\n\n"
+        _persist_chat(conv_id, query, delta)
         return
 
     cat = maybe_catalog(set_name, query, conv_id, filter_kind)

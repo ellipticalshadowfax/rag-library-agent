@@ -115,9 +115,38 @@
   .source.open .snippet { display: block; }
   .fiction-banner { background: rgba(255,122,195,.08); border: 1px solid var(--fiction); color: var(--fiction); padding: 10px 14px; border-radius: 8px; font-size: 13px; }
   .lowrel-banner { background: rgba(246,196,83,.08); border: 1px solid var(--warn); color: var(--warn); padding: 10px 14px; border-radius: 8px; font-size: 13px; }
+  .warn-banner { background: rgba(246,196,83,.08); border: 1px solid var(--warn); color: var(--warn); padding: 8px 12px; border-radius: 8px; font-size: 13px; margin: 4px 0; }
+  .spec-unit { display: flex; align-items: center; gap: 8px; padding: 7px 8px; cursor: pointer; border-radius: 6px; font-size: 13px; }
+  .spec-unit:hover { background: var(--panel2); }
+  .spec-unit .alloc { width: 60px; }
+  .qz-dots { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0; }
+  .qz-dot { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 50%; border: 1px solid var(--border); font-size: 11px; color: var(--muted); }
+  .qz-qprompt { font-size: 15px; }
+  .qz-choices { display: flex; flex-direction: column; gap: 6px; margin: 10px 0; }
+  .qz-choice { display: flex; align-items: center; gap: 8px; padding: 9px 11px; border: 1px solid var(--border); border-radius: 8px; cursor: pointer; font-size: 13.5px; }
+  .qz-choice:hover { border-color: var(--accent); background: var(--panel2); }
+  .qz-feedback { font-size: 14px; padding: 8px 12px; border-radius: 8px; margin: 8px 0; }
+  .qz-feedback.ok { background: rgba(61,220,132,.10); border: 1px solid var(--ok); color: var(--ok); }
+  .qz-feedback.bad { background: rgba(231,85,74,.10); border: 1px solid var(--err); color: var(--err); }
+  .qz-excerpt { border-left: 3px solid var(--accent); padding: 4px 10px; margin: 6px 0; background: var(--panel2); border-radius: 0 6px 6px 0; font-size: 13px; }
+  .qz-section { margin: 12px 0; padding-top: 10px; border-top: 1px solid var(--border); }
+  .qz-missed { padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; font-size: 13px; margin: 6px 0; }
+  .qz-results h3 { margin: 0 0 4px; }
   .badge-pill { display:inline-block; margin-right:6px; padding:1px 8px; border-radius:10px; font-size:11px; letter-spacing:.5px; vertical-align:1px; }
   .badge-pill.list { background: rgba(61,220,132,.12); color: var(--ok); }
   .badge-pill.quiz { background: rgba(246,196,83,.12); color: var(--warn); }
+  /* ── FSRS review pane (SESSION 5) ── */
+  .rv-card { border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin: 8px 0; background: var(--panel); box-shadow: var(--shadow-sm); }
+  .rv-qtype { text-transform: uppercase; letter-spacing: .4px; font-size: 11px; }
+  .rv-answer { border-left: 3px solid var(--ok); padding: 6px 10px; margin: 8px 0; background: var(--panel2); border-radius: 0 6px 6px 0; font-size: 13.5px; }
+  .rv-actions { margin-top: 4px; }
+  .rv-rating { margin-top: 10px; }
+  .rv-rate { font-size: 12.5px; padding: 6px 14px; }
+  .rv-rate.rv-bad { border-color: var(--err); color: var(--err); }
+  .rv-rate.rv-warn { border-color: var(--warn); color: var(--warn); }
+  .rv-rate.rv-ok { border-color: var(--ok); color: var(--ok); }
+  .rv-rate.rv-easy { border-color: var(--accent); color: var(--accent); }
+  .rv-due-badge { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 10px; font-size: 11px; background: rgba(246,196,83,.15); color: var(--warn); }
   .answer table { border-collapse: collapse; width: 100%; margin: 8px 0; font-size: 13px; }
   .answer th, .answer td { border: 1px solid var(--border); padding: 5px 8px; text-align: left; word-break: break-word; vertical-align: top; }
   .answer th { background: var(--panel); }
@@ -226,6 +255,7 @@
   <button data-tab="tab-ocr"><span class="nav-ico">&#128424;</span> OCR</button>
   <button data-tab="tab-ingest"><span class="nav-ico">&#128228;</span> Ingest</button>
   <button class="active" data-tab="tab-chat"><span class="nav-ico">&#128172;</span> Chat</button>
+  <button data-tab="tab-study"><span class="nav-ico">&#127891;</span> Study</button>
 </nav>
 <main>
 
@@ -359,6 +389,7 @@
       <div class="btn-row">
         <button class="btn" id="btnSaveConfig">Save config</button>
       </div>
+      <div class="small muted" style="margin-top:8px">Advanced/internal retrieval &amp; quiz keys (e.g. <code>fuse_rrf_k</code>, <code>bm25_top_n</code>, <code>rerank_top_n</code>, <code>quiz_material_chunks</code>, <code>lexical_backend</code>) are not rendered here &mdash; edit them directly in <code>config.json</code>.</div>
     </div>
 
     <div class="panel">
@@ -629,6 +660,150 @@
     </div>
   </section>
 
+  <!-- ═══ STUDY ═══ -->
+  <section class="tab" id="tab-study">
+    <div class="panel">
+      <h3>Quiz builder</h3>
+      <div class="small muted" style="margin-bottom:10px">Plan a quiz against a work, explicit sections, or a topic. This pane is the planner (SESSION 2): it produces an editable <b>spec</b> &mdash; question generation ships in the next session.</div>
+      <div class="grid">
+        <div>
+          <label>Mode</label>
+          <select id="qzMode">
+            <option value="work">Work (whole book)</option>
+            <option value="sections">Sections</option>
+            <option value="topic">Topic</option>
+          </select>
+        </div>
+        <div>
+          <label>Collection</label>
+          <select id="qzSet"></select>
+        </div>
+        <div>
+          <label>Work</label>
+          <input type="text" id="qzWork" list="qzWorkList" placeholder="Book title">
+          <datalist id="qzWorkList"></datalist>
+        </div>
+        <div id="qzSectionsField" class="hidden">
+          <label>Sections <span class="small muted">(unit ids, comma-separated, or a range like 3-8)</span></label>
+          <input type="text" id="qzSections" placeholder="u1,u2 or 3-8">
+        </div>
+        <div id="qzTopicField" class="hidden">
+          <label>Topic</label>
+          <input type="text" id="qzTopic" placeholder="e.g. routing algorithms">
+        </div>
+        <div>
+          <label>Depth</label>
+          <select id="qzDepth">
+            <option value="surface">Surface</option>
+            <option value="balanced" selected>Balanced</option>
+            <option value="deep">Deep</option>
+          </select>
+        </div>
+        <div>
+          <label>Number of questions</label>
+          <input type="number" id="qzCount" min="1" max="1200" value="10">
+        </div>
+        <div>
+          <label>Difficulty</label>
+          <select id="qzDifficulty">
+            <option value="mixed" selected>Mixed</option>
+            <option value="easy">Easy</option>
+            <option value="medium">Medium</option>
+            <option value="hard">Hard</option>
+          </select>
+        </div>
+        <div>
+          <label>Question types</label>
+          <select id="qzTypes" multiple size="4">
+            <option value="mcq" selected>Multiple choice</option>
+            <option value="true_false" selected>True / False</option>
+            <option value="short_answer">Short answer</option>
+            <option value="fill_blank" selected>Fill in the blank</option>
+          </select>
+        </div>
+      </div>
+      <div class="btn-row">
+        <button class="btn" id="btnPlanQuiz">Plan quiz</button>
+        <span class="small muted" id="qzPlanInfo"></span>
+      </div>
+    </div>
+
+    <div class="panel hidden" id="qzSpecPanel">
+      <h3>Quiz spec <button class="btn secondary" id="btnEditSpec" style="float:right">Revise</button></h3>
+      <div id="qzWarnings"></div>
+      <div class="small muted" id="qzSpecSummary"></div>
+      <div id="qzUnits"></div>
+      <div class="btn-row">
+        <button class="btn" id="btnGenerateQuiz">Generate quiz</button>
+        <span class="small muted" id="qzGenInfo"></span>
+      </div>
+      <div class="hidden" id="qzGenProgress" style="margin-top:10px">
+        <div class="small muted" id="qzGenMsg">Starting&hellip;</div>
+        <div class="progress-wrap" style="margin:8px 0"><div class="progress-bar" id="qzGenBar"></div></div>
+      </div>
+    </div>
+
+    <div class="panel hidden" id="qzOutOfScopePanel">
+      <h3 id="qzOosTitle">Out of scope</h3>
+      <div id="qzOosBody"></div>
+    </div>
+
+    <div class="panel">
+      <h3>Saved specs</h3>
+      <div id="qzSpecList" class="small muted">(plan a quiz to list specs)</div>
+    </div>
+
+    <div class="panel">
+      <h3>Generated quizzes</h3>
+      <div id="qzQuizList" class="small muted">(generate a quiz to list them)</div>
+      <div class="small muted" id="qzBuildReport" style="margin-top:8px"></div>
+    </div>
+
+    <div class="panel" id="coursePanel">
+      <h3>Course <span class="small muted">unit syllabus &amp; progress</span></h3>
+      <div class="grid">
+        <div>
+          <label>Work</label>
+          <input type="text" id="courseWork" list="courseWorkList" placeholder="Book title">
+          <datalist id="courseWorkList"></datalist>
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <button class="btn" id="btnLoadCourse">Load course</button>
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <button class="btn secondary" id="btnCourseSummary">Whole-work reading summary</button>
+        </div>
+      </div>
+      <div class="small muted" id="courseStats" style="margin-top:8px"></div>
+      <div class="small muted" id="courseSummary" style="margin-top:8px"></div>
+      <div id="courseUnits" style="margin-top:10px">
+        <div class="small muted">(load a course to list its units)</div>
+      </div>
+    </div>
+
+    <div class="panel hidden" id="qzPlayerPanel">
+      <h3>Take quiz <span class="small muted" id="qzPlayerTitle"></span>
+        <button class="btn secondary" id="btnQzQuit" style="float:right">Quit</button>
+      </h3>
+      <div id="qzPlayerWrap">
+        <div id="qzPlayerProgress"></div>
+        <div id="qzQuestion" style="margin-top:12px"></div>
+      </div>
+    </div>
+
+    <div class="panel" id="rvPanel">
+      <h3>Review <span class="small muted">FSRS spaced repetition</span>
+        <button class="btn secondary" id="btnRefreshReview" style="float:right">Refresh</button>
+      </h3>
+      <div class="small muted" id="rvDesc">Missed questions from finished attempts are enrolled here and come due on a spaced-repetition schedule. Rate each card after you think of the answer.</div>
+      <div id="rvStats" class="small" style="margin:8px 0"></div>
+      <div id="rvDueList"></div>
+      <div id="rvEmpty" class="small muted" style="margin-top:8px"></div>
+    </div>
+  </section>
+
 </main>
 
 <!-- ── First-run wizard ── -->
@@ -861,6 +1036,7 @@ function goTab(id) {
   if (id === 'tab-ingest') { refreshCollections(); refreshIngest(); }
   if (id === 'tab-ocr') refreshOcr();
   if (id === 'tab-chat') refreshChatSets();
+  if (id === 'tab-study') refreshStudy();
 }
 document.querySelectorAll('nav button').forEach(b => b.onclick = () => goTab(b.dataset.tab));
 
@@ -1969,6 +2145,749 @@ async function ask() {
   }
 }
 loadConvs();
+
+// ── Study tab (SESSION 2: planner / editable spec) ──────────────────────────
+let qzSpec = null;
+
+function refreshStudy() {
+  try { refreshQuizSets(); } catch (e) {}
+  loadSpecList();
+  loadQuizList();
+  try { refreshReview(); } catch (e) {}
+  const cur = $('#qzSet').value;
+  if (cur) loadWorkList(cur);
+}
+
+async function refreshQuizSets() {
+  let cols;
+  try { cols = await api.get('/api/collections'); } catch (e) { return; }
+  const sel = $('#qzSet');
+  const cur = sel.value;
+  sel.innerHTML = cols.map(c => `<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)} (${c.count})</option>`).join('');
+  if (cur && cols.some(c => c.name === cur)) sel.value = cur;
+}
+
+async function loadWorkList(set) {
+  let data;
+  try { data = await api.get('/api/quiz/books?set_name=' + encodeURIComponent(set)); } catch (e) { return; }
+  const opts = (data.books || []).map(b => `<option value="${escapeHtml(b.title)}">`).join('');
+  const list = $('#qzWorkList');
+  list.innerHTML = opts;
+  const cw = $('#courseWorkList');
+  if (cw) cw.innerHTML = opts;
+}
+
+// ── Course view (SESSION 6) ────────────────────────────────────────────────
+// Browsable syllabus for a work: unit list with word counts and quizzed
+// progress, a whole-work reading summary (map-reduce), per-unit reading
+// summaries, and a per-unit "quiz this unit" action (plans a sections spec).
+
+async function loadCourse() {
+  const set = $('#qzSet').value || 'veracrypt1';
+  const work = ($('#courseWork').value || '').trim();
+  if (!work) return toast('Enter a work title first.');
+  $('#courseUnits').innerHTML = '<div class="spinner"></div> Loading course…';
+  $('#courseStats').textContent = '';
+  $('#courseSummary').textContent = '';
+  let data;
+  try { data = await api.get('/api/course?set=' + encodeURIComponent(set) + '&work=' + encodeURIComponent(work)); }
+  catch (e) { $('#courseUnits').innerHTML = '<div class="small muted">Course unavailable: ' + escapeHtml(e.message) + '</div>'; return; }
+  if (data.error) { $('#courseUnits').innerHTML = '<div class="small muted">' + escapeHtml(data.error) + '</div>'; return; }
+  const units = data.units || [];
+  const quizzed = data.quizzed_count || 0;
+  $('#courseStats').innerHTML = `<b>${data.title}</b> — ${units.length} unit(s), ` +
+    `<b>${quizzed}</b> quizzed so far` +
+    ` ${data.unit_count ? `(${Math.round(quizzed / data.unit_count * 100)}%)` : ''}` +
+    (data.warnings && data.warnings.length ? ' <span class="small muted">' + escapeHtml(data.warnings[0]) + '</span>' : '');
+  const box = $('#courseUnits');
+  box.innerHTML = '';
+  for (const u of units) {
+    const item = el('div', 'spec-unit');
+    item.style.cursor = 'default';
+    item.innerHTML =
+      `<label style="flex:1"><b>${escapeHtml(u.title)}</b>` +
+      (u.subtopics && u.subtopics.length ? ` <span class="small muted">(${escapeHtml(u.subtopics.join(', '))})</span>` : '') +
+      ` <span class="small muted">· ${u.words}w</span>` +
+      (u.quizzed ? ' <span class="badge-pill quiz">quizzed</span>' : '') +
+      `</label>` +
+      `<button class="btn secondary" data-a="sum" title="Reading summary">summary</button>` +
+      `<button class="btn secondary" data-a="sum" title="Quiz this unit">quiz unit</button>`;
+    // wire sub-actions
+    const btns = item.querySelectorAll('button');
+    btns[0].onclick = () => loadUnitSummary(work, u);
+    btns[1].onclick = () => quizCourseUnit(work, u, set);
+    box.appendChild(item);
+    const sumWrap = el('div', 'small muted');
+    sumWrap.style.padding = '0 8px 8px 22px';
+    sumWrap.id = 'unitSum-' + u.unit_id;
+    box.appendChild(sumWrap);
+  }
+}
+
+async function loadUnitSummary(work, unit) {
+  const set = $('#qzSet').value || 'veracrypt1';
+  const wrap = $('#unitSum-' + unit.unit_id);
+  if (!wrap) return;
+  if (wrap.textContent) { wrap.textContent = ''; return; }
+  wrap.innerHTML = '<div class="spinner"></div> summarizing…';
+  try {
+    const r = await api.post('/api/course/unit-summary', { set_name: set, work, unit_id: unit.unit_id });
+    wrap.innerHTML = r.error ? '<span class="muted">' + escapeHtml(r.error) + '</span>'
+                              : renderMarkdown(r.summary || '');
+  } catch (e) { wrap.innerHTML = '<span class="muted">summary failed</span>'; }
+}
+
+async function quizCourseUnit(work, unit, set) {
+  try {
+    const r = await api.post('/api/course/quiz-unit', { set_name: set, work, unit_id: unit.unit_id, count: 10 });
+    if (r.error) return toast('Plan failed: ' + r.error);
+    toast('Unit quiz planned (' + (r.spec && r.spec.id) + '). Press Generate in the builder.');
+    if (r.spec) { qzSpec = r.spec; renderQzSpec({ spec: r.spec }); }
+  } catch (e) { toast('Plan failed: ' + e.message); }
+}
+
+async function loadCourseSummary() {
+  const set = $('#qzSet').value || 'veracrypt1';
+  const work = ($('#courseWork').value || '').trim();
+  if (!work) return toast('Enter a work title first.');
+  $('#courseSummary').innerHTML = '<div class="spinner"></div> Summarizing whole work…';
+  try {
+    const r = await api.post('/api/course/summary', { set_name: set, work });
+    $('#courseSummary').innerHTML = r.error ? '<span class="muted">' + escapeHtml(r.error) + '</span>'
+      : renderMarkdown(r.summary || '(no summary)');
+  } catch (e) { $('#courseSummary').innerHTML = '<span class="muted">summary failed</span>'; }
+}
+
+
+// Toggle mode-dependent fields (sections / topic) based on selected mode.
+function syncQzModeFields() {
+  const mode = $('#qzMode').value;
+  $('#qzSectionsField').classList.toggle('hidden', mode !== 'sections');
+  $('#qzTopicField').classList.toggle('hidden', mode !== 'topic');
+}
+
+function currentQzRequest() {
+  const set = $('#qzSet').value || 'veracrypt1';
+  const mode = $('#qzMode').value;
+  const req = {
+    set_name: set,
+    mode: mode,
+    depth: $('#qzDepth').value,
+    count: parseInt($('#qzCount').value, 10) || 10,
+    difficulty: $('#qzDifficulty').value,
+    types: [...$('#qzTypes').selectedOptions].map(o => o.value),
+  };
+  if (mode === 'work') req.work = $('#qzWork').value.trim();
+  else if (mode === 'sections') {
+    req.work = $('#qzWork').value.trim();
+    const raw = $('#qzSections').value.trim();
+    req.unit_ids = raw.split(',').map(s => s.trim()).filter(Boolean);
+  } else {
+    req.topic = $('#qzTopic').value.trim() || $('#qzWork').value.trim();
+  }
+  return req;
+}
+
+async function planQuiz() {
+  const btn = $('#btnPlanQuiz');
+  const req = currentQzRequest();
+  if (!req.work && req.mode !== 'topic') return toast('Enter a work title.');
+  if (req.mode === 'topic' && !req.topic) return toast('Enter a topic.');
+  await runBusy(btn, async () => {
+    let r;
+    try { r = await api.post('/api/quiz/plan', req); }
+    catch (e) { return toast('Plan failed: ' + e.message); }
+    if (r.error) { $('#qzSpecPanel').classList.add('hidden'); $('#qzOutOfScopePanel').classList.add('hidden'); return toast('Plan failed: ' + r.error); }
+    if (r.out_of_scope) return renderQzOutOfScope(r);
+    qzSpec = r.spec;
+    renderQzSpec(r);
+    loadSpecList();
+  });
+}
+
+function renderQzOutOfScope(r) {
+  qzSpec = null;
+  $('#qzSpecPanel').classList.add('hidden');
+  $('#qzOutOfScopePanel').classList.remove('hidden');
+  $('#qzOosTitle').textContent = 'Out of scope';
+  $('#qzOosBody').innerHTML = `<p>Your request could not be mapped to confident library material.</p>` +
+    (r.message ? `<p class="muted">${escapeHtml(r.message)}</p>` : '') +
+    (r.nearest_works && r.nearest_works.length ? `<p>Nearest works: <b>${r.nearest_works.map(escapeHtml).join('</b>, <b>')}</b></p>` : '');
+}
+
+function renderQzWarnings(list) {
+  const w = $('#qzWarnings');
+  w.innerHTML = '';
+  for (const msg of list || []) {
+    w.appendChild(el('div', 'warn-banner', '&#9888; ' + escapeHtml(msg)));
+  }
+}
+
+function renderQzSpec(r) {
+  const spec = r.spec;
+  $('#qzSpecPanel').classList.remove('hidden');
+  $('#qzOutOfScopePanel').classList.add('hidden');
+  renderQzWarnings(spec.warnings);
+  $('#qzSpecSummary').textContent =
+    `${spec.mode} · ${spec.title || spec.work || ''} · depth ${spec.depth} · ${spec.count} questions · units: ${spec.units.length}` +
+    (spec.syllabus_summary ? `\n${spec.syllabus_summary}` : '');
+  $('#qzSpecSummary').classList.add('small');
+  const box = $('#qzUnits');
+  box.innerHTML = '';
+  for (const u of spec.units) {
+    const row = el('label', 'spec-unit');
+    const cb = el('input', '');
+    cb.type = 'checkbox'; cb.checked = u.selected !== false;
+    cb.onchange = () => { qzRevise({ [cb.checked ? 'include' : 'exclude']: [u.unit_id] }); };
+    row.appendChild(cb);
+    const alloc = el('input', 'alloc');
+    alloc.type = 'number'; alloc.min = '0'; alloc.value = u.allocation;
+    alloc.onchange = () => { qzRevise({ counts: { [u.unit_id]: parseInt(alloc.value, 10) || 0 } }); };
+    row.appendChild(alloc);
+    const label = el('span', '', escapeHtml(u.title || u.unit_id));
+    row.appendChild(label);
+    const sub = u.subtopics && u.subtopics.length ? el('span', 'muted small', ' — ' + escapeHtml(u.subtopics.join(', '))) : null;
+    if (sub) row.appendChild(sub);
+    box.appendChild(row);
+  }
+  document.querySelectorAll('.spec-unit').forEach((r_, i) => {
+    if (i % 2) r_.style.background = 'rgba(0,0,0,0.02)';
+  });
+}
+
+// Apply a package of deltas (unit toggles / counts) to the current spec.
+let qzReviseQ = Promise.resolve();
+function qzRevise(delta) {
+  if (!qzSpec) return;
+  qzReviseQ = qzReviseQ.then(async () => {
+    let r;
+    try { r = await api.post('/api/quiz/plan/revise', { spec: qzSpec, deltas: delta }); }
+    catch (e) { return toast('Revise failed: ' + e.message); }
+    if (r.error) return toast('Revise failed: ' + r.error);
+    qzSpec = r.spec;
+    renderQzSpec(r);
+    loadSpecList();
+  });
+}
+$('#btnEditSpec').onclick = () => {
+  if (!qzSpec) return;
+  const msg = 'Total questions:';
+  showDlg({ message: msg, input: true, value: String(qzSpec.count), okText: 'Apply' }).then(v => {
+    if (v != null) qzRevise({ count: parseInt(v, 10) || qzSpec.count });
+  });
+};
+$('#btnGenerateQuiz').onclick = generateQuiz;
+
+// ── Quiz generation (SESSION 3) ─────────────────────────────────────────────
+// Generate a quiz from the current spec via SSE. Progressive per-unit deltas
+// update the progress bar; on completion we show the build report and refresh
+// the generated-quiz list.
+
+async function generateQuiz() {
+  if (!qzSpec) return toast('No quiz spec to generate from.');
+  const btn = $('#btnGenerateQuiz');
+  if (btn.disabled) return;
+  const set = qzSpec.set_name || $('#qzSet').value || 'veracrypt1';
+  const prog = $('#qzGenProgress');
+  const bar = $('#qzGenBar');
+  const msg = $('#qzGenMsg');
+  $('#qzBuildReport').textContent = '';
+  prog.classList.remove('hidden');
+  bar.style.width = '0%';
+  msg.textContent = 'Starting generation\u2026';
+  let total = 0, done = 0;
+  try {
+    await runBusy(btn, async () => {
+      await postSSE('/api/quiz/generate', { set_name: set, spec: qzSpec }, {
+        onProgress: (p) => { if (p && p.message) msg.textContent = p.message; },
+        onDelta: (d) => {
+          const w = d && d.wave;
+          if (!w) return;
+          if (w.type === 'unit') {
+            total = w.requested || 0; done = w.accepted || 0;
+            bar.style.width = Math.min(100, total ? Math.round(done / total * 100) : 0) + '%';
+            msg.textContent = `Generated ${done}/${total} questions for this unit\u2026`;
+          }
+        },
+        onDone: (r) => {
+          if (r && r.id) {
+            bar.style.width = '100%';
+            msg.textContent = `Quiz ready — ${(r.questions || []).length} questions.`;
+            renderBuildReport(r.report);
+          }
+        },
+        onError: (e) => { throw new Error((e && e.error) || 'Generation failed.'); },
+      });
+    });
+  } catch (e) {
+    msg.textContent = e.message;
+    toast(e.message);
+  }
+  loadQuizList();
+}
+
+function renderBuildReport(report) {
+  const box = $('#qzBuildReport');
+  if (!report) { box.innerHTML = ''; return; }
+  const per = report.per_unit || {};
+  const units = Object.entries(per).map(([uid, p]) =>
+    `${escapeHtml(uid)}: ${p.accepted}/${p.requested}`).join(' · ');
+  const stages = report.stages || {};
+  const drops = report.drop_reasons || {};
+  const dropTxt = Object.entries(drops).map(([k, v]) => `${k} (${v})`).join(', ') || 'none';
+  const warns = (report.warnings || []).map(escapeHtml).join('<br>');
+  box.classList.remove('muted');
+  box.innerHTML =
+    `<b>Build report</b> — ${report.total_accepted}/${report.total_requested} accepted` +
+    ` (structured output: ${report.structured_output ? 'on' : 'off'})` +
+    `<div class="small muted">Units: ${units || 'none'}</div>` +
+    `<div class="small muted">Parse: ${stages.parse || 0} dropped · verify: ${stages.verify || 0} · dedupe: ${stages.dedupe || 0} · drops: ${escapeHtml(dropTxt)}</div>` +
+    (warns ? `<div class="small warn-banner">&#9888; ${warns}</div>` : '');
+}
+
+async function loadQuizList() {
+  const set = $('#qzSet').value || 'veracrypt1';
+  let data;
+  try { data = await api.get('/api/quizzes?set_name=' + encodeURIComponent(set)); }
+  catch (e) { return; }
+  let due = {};
+  try {
+    const dueData = await api.get('/api/review/summary?set=' + encodeURIComponent(set));
+    due = dueData.due || {};
+  } catch (e) {}
+  const box = $('#qzQuizList');
+  const list = (data.quizzes || []).slice(0, 20);
+  if (!list.length) { box.innerHTML = '(generate a quiz to list them)'; box.classList.add('muted'); return; }
+  box.classList.remove('muted');
+  box.innerHTML = '';
+  for (const q of list) {
+    const item = el('div', 'conv-item');
+    const badge = due[q.id] ? `<span class="rv-due-badge">${due[q.id]} due</span>` : '';
+    item.appendChild(el('span', 't', escapeHtml(q.title + ' · ' + q.question_count + 'q · ' + (q.status || '')) + badge));
+    const play = el('span', 'del', '&#9654;');
+    play.title = 'Take this quiz';
+    play.onclick = (ev) => { ev.stopPropagation(); startQuizPlayer(q.id); };
+    item.appendChild(play);
+    const open = el('span', 'del', '&#128269;');
+    open.title = 'View quiz';
+    open.onclick = (ev) => { ev.stopPropagation(); openQuiz(q.id); };
+    item.appendChild(open);
+    const del = el('span', 'del', '&#10005;');
+    del.title = 'Delete quiz';
+    del.onclick = (ev) => { ev.stopPropagation(); deleteQuiz(q.id); };
+    item.appendChild(del);
+    item.onclick = () => openQuiz(q.id);
+    box.appendChild(item);
+  }
+}
+
+async function openQuiz(id) {
+  let quiz;
+  try { quiz = await api.get('/api/quiz/' + id); } catch (e) { return toast('Failed to load quiz.'); }
+  if (!quiz || quiz.error) return toast('Quiz not found.');
+  const box = $('#qzBuildReport');
+  renderBuildReport(quiz.report);
+  const md = (quiz.questions || []).map((qu, i) => {
+    const t = qu.type || 'mcq', diff = qu.difficulty || 'medium';
+    let s = `**${i + 1}. ${qu.q}**\n\n<span class="small muted">*${t} · ${diff}*</span>\n`;
+    if (qu.choices) s += qu.choices.map(c => `- ${c}`).join('\n') + '\n';
+    s += `\n**Answer:** ${qu.answer}\n`;
+    const p = qu.provenance || {};
+    if (p.section_title) s += `*${p.section_title}* · `;
+    if (p.excerpt_snippet) s += `> ${p.excerpt_snippet}`;
+    return s;
+  }).join('\n\n');
+  box.insertAdjacentHTML('beforeend', `<div class="small muted" style="margin-top:6px">${renderMarkdown(md)}</div>`);
+}
+
+async function deleteQuiz(id) {
+  const ok = await showDlg({ message: 'Delete this generated quiz?', danger: true, okText: 'Delete', icon: '&#9888;' });
+  if (!ok) return;
+  await api.post('/api/quiz/' + id, {}, 'DELETE');
+  $('#qzBuildReport').textContent = '';
+  loadQuizList();
+  quitQzPlayer();
+}
+
+// ── Quiz player (SESSION 4) ─────────────────────────────────────────────────
+// Take a stored quiz one question at a time: immediate feedback with the
+// provenance excerpt + a "view source" hint, a progress indicator, and an end
+// screen showing score, per-unit accuracy bars, weak areas, and the
+// missed-question list with excerpts.
+
+let qzPlay = null;
+
+async function startQuizPlayer(quizId) {
+  let quiz;
+  try { quiz = await api.get('/api/quiz/' + quizId); } catch (e) { return toast('Failed to load quiz.'); }
+  if (!quiz || quiz.error) return toast('Quiz not found.');
+  if (!(quiz.questions || []).length) return toast('This quiz has no questions to take.');
+  let attempt;
+  try { attempt = await api.post('/api/quiz/' + quizId + '/attempt'); }
+  catch (e) { return toast('Could not start attempt: ' + e.message); }
+  if (attempt.error) return toast('Could not start attempt: ' + attempt.error);
+  qzPlay = {
+    quizId: quizId,
+    title: quiz.title || 'Quiz',
+    attemptId: attempt.attempt_id,
+    questions: attempt.questions || [],
+    index: 0,
+    answered: false,
+    results: [],
+  };
+  $('#qzPlayerPanel').classList.remove('hidden');
+  $('#qzPlayerTitle').textContent = '— ' + escapeHtml(qzPlay.title);
+  $('#qzBuildReport').innerHTML = '';
+  renderQzPlayer();
+}
+
+function quitQzPlayer() {
+  qzPlay = null;
+  $('#qzPlayerPanel').classList.add('hidden');
+  $('#qzQuestion').innerHTML = '';
+  $('#qzPlayerProgress').innerHTML = '';
+}
+
+function renderQzPlayer() {
+  if (!qzPlay) return;
+  const total = qzPlay.questions.length;
+  const idx = qzPlay.index;
+  const q = qzPlay.questions[idx] || {};
+  const answered = qzPlay.answered;
+  const count = qzPlay.results.length;
+
+  // Progress indicator: dots / filled count.
+  let dots = '';
+  for (let i = 0; i < total; i++) {
+    dots += `<span class="qz-dot" data-i="${i}" style="opacity:${i <= idx ? 1 : 0.35};${i < count ? 'background:var(--accent)' : ''}">${i + 1}</span>`;
+  }
+  $('#qzPlayerProgress').innerHTML =
+    `<div class="small muted">Question ${Math.min(idx + 1, total)} of ${total} · ${count}/${total} answered</div>` +
+    `<div class="qz-dots">${dots}</div>`;
+
+  // Question body.
+  const qtype = q.type || 'mcq';
+  let inner = `<div class="qz-qprompt">${renderMarkdown(q.q || '(question)')}</div>`;
+  inner += `<div class="small muted" style="margin:6px 0">*${escapeHtml(qtype)}` +
+    (q.difficulty ? ` · ${escapeHtml(q.difficulty)}` : '') + `*</div>`;
+
+  if (answered) {
+    const res = qzPlay.results[qzPlay.results.length - 1] || {};
+    const prov = q.provenance || {};
+    const mark = res.correct ? '&#10004;' : '&#10008;';
+    inner += `<div class="qz-feedback ${res.correct ? 'ok' : 'bad'}">${mark} <b>${res.correct ? 'Correct' : 'Incorrect'}</b></div>`;
+    inner += `<div class="small"><b>Expected:</b> ${escapeHtml(res.expected || '')}</div>`;
+    if (res.feedback) inner += `<div class="small"><b>Feedback:</b> ${escapeHtml(res.feedback)}</div>`;
+    if (prov.section_title) inner += `<div class="small muted">Source: ${escapeHtml(prov.section_title)}</div>`;
+    if (prov.excerpt_snippet) inner += `<div class="qz-excerpt">${renderMarkdown('> ' + prov.excerpt_snippet)}</div>`;
+    const isLast = idx >= total - 1;
+    inner += `<div class="btn-row"><button class="btn" id="btnQzNext">${isLast ? 'Finish &amp; see results' : 'Next question'}</button></div>`;
+  } else {
+    if (qtype === 'true_false') {
+      inner += `<div class="qz-choices"><label class="qz-choice"><input type="radio" name="qzAns" value="true"> true</label>` +
+        `<label class="qz-choice"><input type="radio" name="qzAns" value="false"> false</label></div>`;
+    } else if (qtype === 'mcq') {
+      let choices = '';
+      for (const c of (q.choices || [])) {
+        choices += `<label class="qz-choice"><input type="radio" name="qzAns" value="${escapeHtml(c)}"> <span>${escapeHtml(c)}</span></label>`;
+      }
+      inner += `<div class="qz-choices">${choices}</div>`;
+    } else {
+      inner += `<p class="small muted">Type your answer (short answers are graded, then you may refine).</p>` +
+        `<input type="text" id="qzAnsText" placeholder="Type your answer…" autocomplete="off" style="width:100%;box-sizing:border-box">`;
+    }
+    inner += `<div class="btn-row"><button class="btn" id="btnQzSubmit">Submit answer</button></div>`;
+  }
+  $('#qzQuestion').innerHTML = inner;
+  $('#btnQzNext').onclick = nextQzQuestion;
+  $('#btnQzSubmit').onclick = submitQzAnswer;
+  if (!$('#qzAnsText')) return;
+  const inp = $('#qzAnsText');
+  inp.onkeydown = (e) => { if (e.key === 'Enter') submitQzAnswer(); };
+  setTimeout(() => inp.focus(), 30);
+}
+
+async function submitQzAnswer() {
+  if (!qzPlay || qzPlay.answered) return;
+  const q = qzPlay.questions[qzPlay.index];
+  let response;
+  let qtype = (q.type || 'mcq');
+  if (qtype === 'true_false') {
+    const sel = document.querySelector('input[name="qzAns"]:checked');
+    if (!sel) return toast('Select true or false.');
+    response = sel.value;
+  } else if (qtype === 'mcq') {
+    const sel = document.querySelector('input[name="qzAns"]:checked');
+    if (!sel) return toast('Select an answer.');
+    response = sel.value;
+  } else {
+    response = ($('#qzAnsText')?.value || '').trim();
+    if (!response) return toast('Type an answer.');
+  }
+  const btn = $('#btnQzSubmit');
+  let res;
+  try {
+    res = await api.post('/api/quiz/' + qzPlay.quizId + '/answer', {
+      attempt_id: qzPlay.attemptId, qid: q.qid, response,
+    });
+  } catch (e) { return toast('Grading failed: ' + e.message); }
+  if (res.error) return toast('Grading failed: ' + res.error);
+  qzPlay.results.push({ correct: res.correct, expected: res.expected, feedback: res.feedback });
+  qzPlay.answered = true;
+  renderQzPlayer();
+}
+
+function nextQzQuestion() {
+  if (!qzPlay) return;
+  if (qzPlay.index >= qzPlay.questions.length - 1) {
+    finishQzPlayer();
+    return;
+  }
+  qzPlay.index += 1;
+  qzPlay.answered = false;
+  renderQzPlayer();
+}
+
+async function finishQzPlayer() {
+  if (!qzPlay) return;
+  let r;
+  try { r = await api.post('/api/quiz/' + qzPlay.quizId + '/finish', { attempt_id: qzPlay.attemptId }); }
+  catch (e) { return toast('Could not finalize attempt: ' + e.message); }
+  const a = (r && r.analytics) || {};
+  renderQzResults(a);
+}
+
+function renderQzResults(a) {
+  const perUnit = a.per_unit || {};
+  const weak = a.weak_units || [];
+  const marks = { answered: a.answered || 0, total: a.total || 0, correct: a.correct || 0 };
+  const pct = marks.total ? Math.round((marks.correct / marks.total) * 100) : 0;
+  const accuracy = a.accuracy != null ? Math.round(a.accuracy * 100) : 0;
+
+  let unitRows = '';
+  for (const [unit, b] of Object.entries(perUnit)) {
+    const ua = b.total ? Math.round((b.correct / b.total) * 100) : 0;
+    const weakMark = b.total > 0 && ua < 60 ? ' &#9888; weak' : '';
+    unitRows += `<div class="small" style="margin:4px 0">
+      <b>${escapeHtml(unit)}</b> — ${b.correct}/${b.total} (${ua}%)
+      <div class="progress-wrap" style="margin:3px 0"><div class="progress-bar" style="width:${ua}%;background:${ua >= 60 ? 'var(--accent)' : 'var(--warn)'}"></div></div>${weakMark}
+    </div>`;
+  }
+
+  let missed = '';
+  for (const sp of (a.study_points || [])) {
+    missed += `<div class="qz-missed">
+      <b>${escapeHtml(sp.section_title || sp.unit)}</b><br>
+      ${renderMarkdown(sp.question || '')}
+      <div class="small muted">Expected: ${escapeHtml(sp.given || '')}</div>
+      ${sp.excerpt ? `<div class="qz-excerpt">${renderMarkdown('> ' + sp.excerpt)}</div>` : ''}
+    </div>`;
+  }
+
+  const weakTxt = weak.length
+    ? `<div class="warn-banner">&#9888; Weak areas: <b>${weak.map(escapeHtml).join('</b>, <b>')}</b> — review the missed questions below.</div>`
+    : '<div class="small muted" style="color:var(--ok)">No weak units — nice work.</div>';
+
+  $('#qzPlayerProgress').innerHTML = '';
+  $('#qzQuestion').innerHTML = `
+    <div class="qz-results">
+      <h3>${pct}% — ${marks.correct} / ${marks.total} correct</h3>
+      <div class="small muted">Overall accuracy: ${accuracy}% · answered ${marks.answered}${marks.total ? ' of ' + marks.total : ''}</div>
+      <div class="qz-section">${weakTxt}</div>
+      <div class="qz-section"><b>Accuracy by unit</b>${unitRows || '<div class="small muted">(no units)</div>'}</div>
+      ${missed ? `<div class="qz-section"><b>Missed questions (study points)</b>${missed}</div>` : ''}
+      <div class="btn-row">
+        <button class="btn" id="btnQzDone">Close</button>
+      </div>
+    </div>`;
+  $('#btnQzDone').onclick = () => { quitQzPlayer(); loadQuizList(); };
+}
+
+$('#btnQzQuit').onclick = () => quitQzPlayer();
+
+// ── Review pane (SESSION 5: FSRS spaced repetition) ─────────────────────────
+// Missed questions are enrolled into quizzes/review.json at attempt finish and
+// come due on an FSRS schedule. This pane shows the due-today cards with
+// Again/Hard/Good/Easy rating buttons, counts + retention, and a small
+// strength-over-time view. The quiz list also shows a due badge per quiz.
+
+let rvShown = new Set(); // keys for which the answer has been revealed
+
+function refreshReview() {
+  loadReviewStats();
+  loadReviewQueue();
+}
+
+function fmtWhen(iso) {
+  if (!iso) return 'now';
+  const d = new Date(iso);
+  if (isNaN(d)) return 'now';
+  const diff = d.getTime() - Date.now();
+  if (diff <= 0) return 'now';
+  const mins = Math.round(diff / 60000);
+  if (mins < 60) return `in ${mins}m`;
+  const hrs = Math.round(mins / 60);
+  if (hrs < 48) return `in ${hrs}h`;
+  const days = Math.round(hrs / 24);
+  return `in ${days}d`;
+}
+
+function strengthSeries(sots) {
+  if (!sots || sots.length < 2) return '';
+  let html = '';
+  const min = Math.min(...sots.map(p => p.stability));
+  const max = Math.max(...sots.map(p => p.stability)) || 1;
+  const w = 420, h = 40;
+  const step = sots.length > 1 ? w / (sots.length - 1) : w;
+  const pts = sots.map((p, i) => {
+    const x = i * step;
+    const y = h - ((p.stability - min) / (max - min)) * (h - 6) - 3;
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  });
+  const line = pts.join(' ');
+  html += `<svg viewBox="0 0 ${w} ${h}" style="width:100%;height:44px;display:block;margin-top:4px" preserveAspectRatio="none">` +
+    `<polyline points="${line}" fill="none" stroke="var(--accent)" stroke-width="2"/>` +
+    `</svg>`;
+  return html;
+}
+
+async function loadReviewStats() {
+  let data;
+  try { data = await api.get('/api/review/stats?set=' + encodeURIComponent($('#qzSet').value || 'veracrypt1')); }
+  catch (e) { return; }
+  const st = data || {};
+  const retention = st.retention_rate != null ? Math.round(st.retention_rate * 100) : 0;
+  let html = `<b>${st.due_count || 0}</b> due now · <b>${st.total_cards || 0}</b> cards · ` +
+    `<b>${st.new_count || 0}</b> new · <b>${st.reviewed_count || 0}</b> reviewed · ` +
+    `retention <b>${retention}%</b>`;
+  const sots = st.strength_over_time || [];
+  if (sots.length >= 2) {
+    html += `<div class="small muted">Strength over time${strengthSeries(sots)}</div>`;
+  } else if (sots.length === 1) {
+    html += `<div class="small muted">Strength: ${sots[0].stability}</div>`;
+  }
+  $('#rvStats').innerHTML = html;
+}
+
+async function loadReviewQueue() {
+  rvShown = new Set();
+  let data;
+  try { data = await api.get('/api/review/queue?set=' + encodeURIComponent($('#qzSet').value || 'veracrypt1')); }
+  catch (e) { $('#rvDueList').innerHTML = '<div class="small muted">Review unavailable.</div>'; return; }
+  const cards = data.cards || [];
+  if (!cards.length) {
+    $('#rvDueList').innerHTML = '';
+    $('#rvEmpty').textContent = 'No cards due right now. Finish a quiz attempt to enroll missed questions here.';
+    return;
+  }
+  $('#rvEmpty').textContent = '';
+  const box = $('#rvDueList');
+  box.innerHTML = '';
+  cards.forEach(c => box.appendChild(renderReviewCard(c)));
+}
+
+function renderReviewCard(c) {
+  // "Again" → red (miss, relearn); "Hard"→amber; "Good"→ok; "Easy"→accent.
+  const ratings = [
+    { k: 'again', label: 'Again', cls: 'rv-bad' },
+    { k: 'hard', label: 'Hard', cls: 'rv-warn' },
+    { k: 'good', label: 'Good', cls: 'rv-ok' },
+    { k: 'easy', label: 'Easy', cls: 'rv-easy' },
+  ];
+  const quizId = escapeHtml(c.quiz_id);
+  const qid = escapeHtml(c.qid);
+  const key = c.key || (c.quiz_id + ':' + c.qid);
+  const shown = rvShown.has(key);
+  const prov = (c.section_title ? `<div class="small muted">Source: ${escapeHtml(c.section_title)}</div>` : '');
+  const excerpt = c.excerpt ? `<div class="qz-excerpt">${renderMarkdown('> ' + c.excerpt)}</div>` : '';
+  const answerBlock = shown
+    ? `<div class="rv-answer"><b>Answer:</b> ${renderMarkdown(c.answer || '(none)')}</div>`
+    : '';
+  const btnRow = ratings.map(r =>
+    `<button class="btn rv-rate ${r.cls}" data-q="${quizId}" data-qid="${qid}" data-k="${r.k}">${r.label}</button>`
+  ).join('');
+
+  const item = el('div', 'rv-card');
+  item.innerHTML =
+    `<div class="rv-qtype small muted">${escapeHtml(c.type || 'mcq')}` +
+    (c.difficulty ? ` · ${escapeHtml(c.difficulty)}` : '') + `</div>` +
+    `<div class="qz-qprompt">${renderMarkdown(c.question || '(question)')}</div>` +
+    prov + excerpt +
+    answerBlock +
+    `<div class="btn-row rv-actions">` +
+    `<button class="btn secondary rv-reveal" data-k="${key}">${shown ? 'Hide answer' : 'Show answer'}</button>` +
+    `</div>` +
+    `<div class="btn-row rv-rating">${btnRow}</div>` +
+    `<div class="small muted">due ${fmtWhen(c.due)} · ${c.reviews || 0} review${c.reviews === 1 ? '' : 's'}</div>`;
+  item.querySelector('.rv-reveal').onclick = () => {
+    if (rvShown.has(key)) rvShown.delete(key); else rvShown.add(key);
+    $('#rvDueList').replaceChild(renderReviewCard(c), item);
+  };
+  item.querySelectorAll('.rv-rate').forEach(b => {
+    b.onclick = () => rateReviewCard(c.quiz_id, c.qid, b.dataset.k);
+  });
+  return item;
+}
+
+async function rateReviewCard(quizId, qid, rating) {
+  let res;
+  try {
+    res = await api.post('/api/review/' + encodeURIComponent(quizId) + '/' + encodeURIComponent(qid), { rating });
+  } catch (e) { return toast('Rating failed: ' + e.message); }
+  if (res.error) return toast('Rating failed: ' + res.error);
+  toast(res.rating + ' — next due ' + fmtWhen(res.due));
+  loadReviewQueue();
+  loadReviewStats();
+  loadQuizList();
+}
+
+$('#btnRefreshReview').onclick = () => { loadReviewQueue(); loadReviewStats(); };
+
+async function loadSpecList() {
+  let data;
+  try { data = await api.get('/api/quiz/specs?set_name=' + encodeURIComponent($('#qzSet').value || 'veracrypt1')); }
+  catch (e) { return; }
+  const box = $('#qzSpecList');
+  const list = data.specs || [];
+  if (!list.length) { box.innerHTML = '(plan a quiz to list specs)'; return; }
+  box.classList.remove('muted');
+  box.innerHTML = '';
+  for (const s of list.slice(0, 20)) {
+    const item = el('div', 'conv-item');
+    item.appendChild(el('span', 't', escapeHtml(s.title + ' · ' + s.count + 'q · ' + s.unit_count + 'u')));
+    const open = el('span', 'del', '&#128269;');
+    open.title = 'Open spec';
+    open.onclick = (ev) => { ev.stopPropagation(); openSpec(s.id); };
+    item.appendChild(open);
+    const del = el('span', 'del', '&#10005;');
+    del.title = 'Delete spec';
+    del.onclick = (ev) => { ev.stopPropagation(); deleteSpec(s.id); };
+    item.appendChild(del);
+    item.onclick = () => openSpec(s.id);
+    box.appendChild(item);
+  }
+}
+async function openSpec(id) {
+  let spec;
+  try { spec = await api.get('/api/quiz/spec/' + id); } catch (e) { return toast('Failed to load spec.'); }
+  if (!spec || spec.error) return toast('Spec not found.');
+  qzSpec = spec;
+  renderQzSpec({ spec: spec, warnings: spec.warnings || [] });
+  if (spec.set_name) $('#qzSet').value = spec.set_name;
+}
+async function deleteSpec(id) {
+  const ok = await showDlg({ message: 'Delete this saved spec?', danger: true, okText: 'Delete', icon: '&#9888;' });
+  if (!ok) return;
+  await api.post('/api/quiz/spec/' + id, {}, 'DELETE');
+  if (qzSpec && qzSpec.id === id) { qzSpec = null; $('#qzSpecPanel').classList.add('hidden'); }
+  loadSpecList();
+}
+
+$('#qzMode').addEventListener('change', syncQzModeFields);
+$('#qzSet').addEventListener('change', () => { loadWorkList($('#qzSet').value); refreshReview(); });
+$('#btnPlanQuiz').onclick = planQuiz;
+$('#btnLoadCourse').onclick = loadCourse;
+$('#btnCourseSummary').onclick = loadCourseSummary;
 </script>
 </body>
 </html>

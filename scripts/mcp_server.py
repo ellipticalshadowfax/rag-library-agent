@@ -351,7 +351,8 @@ def make_quiz(topic: str, set_name: str = "", count: int = 10) -> str:
 
     matched = agent._match_titles(topic, set_name, limit=4)
     material = None
-    MC, MW = 10, 140
+    MC = max(1, min(int(cfg.get("quiz_material_chunks", 10) or 10), 100))
+    MW = max(10, min(int(cfg.get("quiz_material_words", 140) or 140), 5000))
     with _muted_stdout():
         if matched:
             where = {"title": {"$in": matched}}
@@ -378,6 +379,263 @@ def make_quiz(topic: str, set_name: str = "", count: int = 10) -> str:
         return f"(Quiz generation failed: {err or 'no questions parsed'})"
     return (f"# Quiz{f' — {topic}' if topic else ''}  (set: {set_name})\n\n"
             + study.render_markdown(questions))
+
+
+@mcp.tool()
+def plan_quiz(request: dict, set_name: str = "") -> str:
+    """Plan a persistent (stored, reviewable) quiz against a whole work,
+    explicit sections, or a topic. Returns a spec proposal with numbered unit
+    options. Use for 'quiz me on X' when a stored/reviewable quiz is wanted.
+
+    Args:
+      request: planning request, e.g. {"mode": "work|sections|topic",
+        "work"/"topic": "...", "count": int}. Common keys: count, difficulty,
+        types, depth, minimum_per_unit.
+      set_name: which index collection. Leave empty for the default.
+    """
+    agent = _load_agent()
+    cfg = agent.load_config()
+    set_name = set_name or default_set_name()
+    import quiz_plan
+    with _muted_stdout():
+        plan = quiz_plan.plan_quiz(
+            request or {}, set_name, cfg,
+            embedder=_embedder(), collection=_collection(set_name))
+    if "error" in plan:
+        return f"(plan_quiz failed: {plan['error']})"
+    if plan.get("out_of_scope"):
+        return f"(Out of scope: {plan.get('refusal') or 'no matching units'})"
+    spec = plan["spec"]
+    if not spec.get("id"):
+        import quiz_store
+        with _muted_stdout():
+            spec = quiz_store.create_spec(spec)
+    lines = [f"# Quiz plan: {spec.get('title')}  (set: {set_name})",
+             f"- **Spec id**: `{spec.get('id')}`",
+             f"- **Mode**: {spec.get('mode')} · **Depth**: {spec.get('depth')}",
+             f"- **Total questions**: {spec.get('count')}", ""]
+    for i, u in enumerate(spec.get("units") or [], 1):
+        lines.append(f"{i}. {u.get('title')} — {u.get('allocation')} q"
+                     f" (ordinal {u.get('ordinal')})")
+    if (spec.get("warnings") or []):
+        lines.append("")
+        lines.append("Warnings: " + "; ".join(spec["warnings"][:4]))
+    lines.append("")
+    lines.append("Confirm with build_quiz(spec_id) or adjust first.")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def build_quiz(spec_id: str = "", set_name: str = "") -> str:
+    """Build (generate) a persistent quiz from a spec id returned by
+    plan_quiz. Blocking; returns the quiz id, question count, and build report
+    summary.
+
+    Args:
+      spec_id: the spec id from plan_quiz.
+      set_name: which index collection. Leave empty for the default.
+    """
+    agent = _load_agent()
+    cfg = agent.load_config()
+    set_name = set_name or default_set_name()
+    import quiz_store
+    import quiz_build
+    with _muted_stdout():
+        spec = quiz_store.get_spec(spec_id)
+        if not spec:
+            return (f"(No spec found for id {spec_id!r}. Create one with "
+                    "plan_quiz first.)")
+        quiz = quiz_build.build_quiz(
+            spec, set_name, cfg, agent.setup_client(cfg),
+            collection=_collection(set_name), embedder=_embedder())
+    report = quiz.get("report") or {}
+    body = (f"# Quiz built: {quiz.get('title')}  (set: {set_name})\n\n"
+            f"- **Quiz id**: `{quiz.get('id')}`\n"
+            f"- **Questions**: {len(quiz.get('questions') or [])}\n"
+            f"- **Status**: {quiz.get('status')}\n")
+    if report:
+        body += (f"- **Structured output**: {report.get('structured_output')}\n"
+                 f"- **Accepted**: {report.get('total_accepted')} / "
+                 f"{report.get('total_requested')} requested\n")
+        if report.get("warnings"):
+            body += "- **Warnings**: " + "; ".join(report["warnings"][:4]) + "\n"
+    return body
+
+
+@mcp.tool()
+def get_quiz(quiz_id: str) -> str:
+    """Fetch a stored quiz by id: its questions, answers, counts, and build
+    report. Use after build_quiz to show the user the result.
+
+    Args:
+      quiz_id: the quiz id from build_quiz.
+    """
+    import quiz_store
+    with _muted_stdout():
+        quiz = quiz_store.get_quiz(quiz_id)
+    if not quiz:
+        return f"(No quiz found for id {quiz_id!r}.)"
+    questions = quiz.get("questions") or []
+    lines = [f"# Quiz: {quiz.get('title')}  (set: {quiz.get('set_name')})",
+             f"- **id**: `{quiz.get('id')}` · **questions**: {len(questions)}"
+             f" · **status**: {quiz.get('status')}", ""]
+    for i, qu in enumerate(questions, 1):
+        lines.append(f"**{i}. {qu.get('q')}** ({qu.get('type')}, "
+                     f"{qu.get('difficulty')})")
+        if qu.get("choices"):
+            lines.append("  " + " | ".join(qu.get("choices")))
+        lines.append(f"  *Answer: {qu.get('answer')}*")
+        prov = qu.get("provenance") or {}
+        if prov.get("title"):
+            lines.append(f"  *Source: {prov.get('title')}"
+                         + (f" — {prov.get('section_title') or qu.get('section_title')}"
+                            if prov.get('section_title') or qu.get('section_title') else "")
+                         + "*")
+        lines.append("")
+    report = quiz.get("report") or {}
+    if report and report.get("warnings"):
+        lines.append("Warnings: " + "; ".join(report["warnings"][:4]))
+    return "\n".join(lines) or f"(Quiz {quiz_id} has no questions yet.)"
+
+
+@mcp.tool()
+def grade_answer(quiz_id: str, qid: str, response: str) -> str:
+    """Grade a single answer to one question of a stored quiz. Returns
+    correct/incorrect + feedback. Deterministic for mcq/true_false/fill_blank;
+    LLM-assisted for short answers.
+
+    Args:
+      quiz_id: the quiz id.
+      qid: the question id within the quiz.
+      response: the user's answer.
+    """
+    agent = _load_agent()
+    cfg = agent.load_config()
+    import quiz_store
+    import quiz_grade
+    with _muted_stdout():
+        quiz = quiz_store.get_quiz(quiz_id)
+        if not quiz:
+            return f"(No quiz found for id {quiz_id!r}.)"
+        q = next((x for x in (quiz.get("questions") or [])
+                  if str(x.get("qid")) == str(qid)), None)
+        if q is None:
+            return f"(No question {qid!r} in quiz {quiz_id!r}.)"
+        graded = quiz_grade.grade_answer(q, response, cfg, agent.setup_client(cfg))
+    if graded is None:
+        return f"(Could not grade question {qid!r}.)"
+    verdict = "correct" if graded.get("correct") else "incorrect"
+    body = (f"# Grade: {verdict}\n\n- **Your answer**: {response}\n"
+            f"- **Expected**: {graded.get('expected')}\n"
+            f"- **Score**: {graded.get('score')}\n")
+    if graded.get("feedback"):
+        body += f"- **Feedback**: {graded.get('feedback')}\n"
+    return body
+
+
+@mcp.tool()
+def review_queue(set_name: str = "", limit: int = 20) -> str:
+    """Fetch the due FSRS spaced-repetition review cards (missed/weak
+    questions) for a collection. Use when the user asks about their reviews
+    or what to study next.
+
+    Args:
+      set_name: which index collection. Leave empty for the default.
+      limit: max cards to return (1-50).
+    """
+    set_name = set_name or default_set_name()
+    import quiz_store
+    with _muted_stdout():
+        cards = quiz_store.fetch_due_reviews(
+            set_name=set_name, limit=max(1, min(int(limit or 20), 50)))
+    if not cards:
+        return f"(No review cards are due in set '{set_name}' right now.)"
+    lines = [f"# Due review cards ({len(cards)})  (set: {set_name})", ""]
+    for c in cards:
+        q = c.get("question") or {}
+        prov = q.get("provenance") or {}
+        src = prov.get("section_title") or prov.get("title") or ""
+        lines.append(f"- **{c.get('key')}** — {q.get('q') or ''}"
+                     + (f"  (source: {src})" if src else ""))
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def get_config(keys: list = None) -> str:
+    """Read current app config values. Useful to see retrieval / quiz tuning.
+    Returns a compact key: value list; pass `keys` to narrow to specific keys.
+
+    Args:
+      keys: optional list of config keys to read; omit for the known keys.
+    """
+    agent = _load_agent()
+    cfg = agent.load_config()
+    if keys:
+        return "\n".join(f"{k}: {cfg.get(k)}" for k in keys if k in cfg)
+    notable = ["llm_base_url", "llm_model", "embed_model", "chat_mode",
+               "agentic_enabled", "rerank_enabled", "lexical_backend",
+               "chunking_strategy", "fsrs_enabled", "quiz_default_count",
+               "quiz_batch_parents", "quiz_verify_pass", "quiz_grounding_ratio",
+               "quiz_output_format"]
+    return "\n".join(f"{k}: {cfg.get(k)}" for k in notable)
+
+
+@mcp.tool()
+def set_config(key: str, value) -> str:
+    """Toggle/tweak a config value through the SESSION 1 config registry
+    (only editable keys are accepted). Persists to config.local.json so the
+    running web app honors it. Returns the new value.
+
+    Args:
+      key: a config key from the registry (e.g. 'rerank_enabled', 'fsrs_enabled',
+        'quiz_batch_parents').
+      value: the new value (bool/int/float/string; JSON string parsed properly).
+    """
+    editable = _editable_config_keys()
+    if key not in editable:
+        return f"(config key '{key}' is not writable.)"
+    import json as _json
+    parsed = value
+    if isinstance(value, str):
+        try:
+            parsed = _json.loads(value)
+        except Exception:
+            parsed = value
+        if str(parsed).lower() in ("true", "false"):
+            parsed = str(parsed).lower() == "true"
+    _write_local_cfg(key, parsed)
+    return f"Set {key} = {parsed}"
+
+
+def _editable_config_keys():
+    # Derive the writable key set without importing server.py (avoid heavy deps:
+    # server.py pulls Flask/chroma). server.CONFIG_META is the canonical source;
+    # this mirrors the editable keys so a CLI/MCP client can tweak them. Keep in
+    # sync with server.CONFIG_META (SESSION 1 registry).
+    return {
+        "rerank_enabled", "fsrs_enabled", "quiz_review_limit",
+        "quiz_verify_pass", "quiz_grade_llm", "quiz_batch_parents",
+        "quiz_parent_word_cap", "quiz_max_batches", "quiz_grounding_ratio",
+        "quiz_dedupe_jaccard", "llm_structured_output", "chat_mode",
+        "show_thinking", "agentic_enabled", "agentic_max_steps",
+        "quiz_default_count", "quiz_output_format", "quiz_depth",
+        "quiz_topic_max_works", "quiz_topic_section_pool",
+        "quiz_material_chunks", "quiz_material_words",
+    }
+
+
+def _write_local_cfg(key, value):
+    import json as _json
+    from _paths import rag_root
+    p = rag_root() / "config.local.json"
+    data = {}
+    if p.exists():
+        try:
+            data = _json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+    data[key] = value
+    p.write_text(_json.dumps(data, indent=2), encoding="utf-8")
 
 
 @mcp.tool()

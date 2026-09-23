@@ -104,6 +104,26 @@ requests that bypass the passage-retrieval cap:
 - **"quiz me on [topic/work]"** — generates structured practice questions with
   collapsible answers and per-question source citations.
 
+### Study tab: builder, player, review, course & exports
+
+The **Study** tab turns quiz generation into a full study loop:
+
+- **Builder** — plan an editable quiz against a whole work, explicit sections,
+  or a free topic (optionally weighted toward units you've been missing), pick a
+  depth and difficulty, then generate an audited quiz (grounded in the work's
+  sections, answer-key verified, de-duplicated).
+- **Player** — take a stored quiz one question at a time with immediate grading
+  (mcq / true-false / fill-blank are deterministic; short answers get optional
+  LLM grading) and an end-of-attempt breakdown of accuracy by unit, difficulty,
+  and type, plus provenance-linked study points.
+- **Review** — missed/weak questions enroll into a shared FSRS spaced-repetition
+  store (`quizzes/review.json`) and resurface on due dates as flashcard-style
+  cards (Again / Hard / Good / Easy), with retention and strength-over-time.
+- **Course** — browse a work's unit syllabus, read a whole-work (or per-unit)
+  reading summary, and jump straight to generating a quiz for a single unit.
+- **Exports** — any generated quiz exports to Moodle GIFT, CSV, JSON, or an Anki
+  `.apkg` deck (`GET /api/quiz/<id>/export?format=...`).
+
 ## Configuration
 
 All settings live in `config.json`:

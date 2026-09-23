@@ -17,6 +17,7 @@ ocr_compare_report.json
 cache/
 ocr/
 conversations/
+quizzes/
 
 # Self-hosted LLM GGUF models (downloaded via the UI on future machines)
 models/
