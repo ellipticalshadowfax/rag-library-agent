@@ -132,6 +132,11 @@ def _gen_prompt(title_label, unit_title, count, material, types, difficulty,
     delimiter mode we use the study.py markdown-with-delimiters format so the
     existing parser handles it. In both cases the model MUST cite the PARENT id
     so the audit can ground the excerpt.
+
+    The EXCERPT instructions are strongly worded because small models (e.g. 1.5B)
+    tend to paraphrase rather than quote — but the grounding audit requires near-
+    exact string matches via difflib.SequenceMatcher ≥ 0.85. Verbatim quoting is
+    enforced by both the prompt text and a separate system-level note.
     """
     types_line = ", ".join(types) if types else "mcq, short_answer, true_false, fill_blank"
     base = (
@@ -140,9 +145,14 @@ def _gen_prompt(title_label, unit_title, count, material, types, difficulty,
         f"source material below. Produce exactly {count} questions.\n"
         f"Allowed types: {types_line}. Difficulty mix: {difficulty}.\n"
         "Each question MUST cite, from the source material, the PARENT id it "
-        "draws from (the id in the header like `(parent=xxx)`) and quote ONE "
-        "sentence of evidence in EXCERPT that is a near-verbatim copy from that "
-        "source, so the evidence can be machine-verified against the source.\n\n"
+        "draws from (the id in the header like `(parent=xxx)`).\n\n"
+        "EXCERPT RULES (critical — your answers will be audited):\n"
+        "- Each question must include ONE sentence of evidence copied EXACTLY "
+        "and VERBATIM from the source material.\n"
+        "- Copy the sentence character-for-character. Do NOT paraphrase, rewrite, "
+        "summarize, or normalize any words.\n"
+        "- If you cannot find an exact matching sentence, omit the question rather "
+        "than inventing one.\n\n"
         "--- Source material ---\n\n" + (material or "(no material provided)"))
     if structured:
         return base + (
@@ -152,7 +162,7 @@ def _gen_prompt(title_label, unit_title, count, material, types, difficulty,
             '["A) ...", "B) ...", ...] (empty array for non-mcq), "answer": '
             '"<answer letter for mcq, else the correct text>", "provenance": '
             '{"title": "<book title>", "section_title": "...", "parent_id": '
-            '"<parent id>", "excerpt_snippet": "<verbatim evidence>"}}]}')
+            '"<parent id>", "excerpt_snippet": "<VERBATIM exact-copy sentence>"}}]}')
     base += (
         "\n\nFor each question output a block separated by a line of 5 dashes "
         "('----------'), with these exact fields:\n"
@@ -165,14 +175,27 @@ def _gen_prompt(title_label, unit_title, count, material, types, difficulty,
         "SOURCE: <book title>\n"
         "SECTION: <chapter/section title>\n"
         "PARENT: <parent id>\n"
-        "EXCERPT: <one quoted sentence of evidence>")
+        "EXCERPT: <VERBATIM exact-copy sentence from source>")
     return base
 
 
 def _call_llm(client, cfg, prompt, structured: bool):
+    """Call the LLM with both a system message (output rules) and user message
+    (the actual quiz generation prompt). A system role helps Qwen2.5 small models
+    follow the verbatim-quoting rule more reliably than a bare user message."""
+    system = (
+        "You are an expert educator writing practice questions for students. "
+        "When asked to produce an EXCERPT or QUOTE, you MUST copy text exactly "
+        "and verbatim from the provided source material — do NOT paraphrase, "
+        "rewrite, summarize, or normalize any words. Every answer must be "
+        "grounded in the source."
+    )
     kwargs = dict(
         model=cfg.get("llm_model", "default"),
-        messages=[{"role": "user", "content": prompt}],
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": prompt},
+        ],
         temperature=0,
         max_tokens=int(cfg.get("max_tokens_quiz", 4096) or 4096),
     )

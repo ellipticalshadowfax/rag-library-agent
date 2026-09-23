@@ -200,6 +200,14 @@ def generate_quiz(topic_or_title, material, cfg, client):
     """
     count = int(cfg.get("quiz_default_count", 10) or 10)
     model = cfg.get("llm_model", "default")
+    # System-level instruction helps small models follow the verbatim rule;
+    # the LLM tends to paraphrase excerpts which then fail the grounding audit.
+    system_prompt = (
+        "You are an expert educator writing practice questions for students. "
+        "When asked to produce an EXCERPT or QUOTE, you MUST copy text exactly "
+        "and verbatim from the provided source material — do NOT paraphrase, "
+        "rewrite, summarize, or normalize any words."
+    )
     prompt = (
         f"Create a practice quiz on the topic \"{topic_or_title}\" based ONLY "
         f"on the source material below. Produce exactly {count} questions.\n\n"
@@ -213,15 +221,20 @@ def generate_quiz(topic_or_title, material, cfg, client):
         "ANSWER: <correct letter, e.g. A, or the correct text>\n"
         "SOURCE: <title of the book this question draws from>\n"
         "SECTION: <chapter or section title if known>\n"
-        "EXCERPT: <one sentence of evidence quoted from the material>\n"
+        "EXCERPT: <VERBATIM exact-copy sentence quoted from the material>\n"
         "----------\n"
+        "EXCERPT RULES:\n"
+        "- Copy the sentence character-for-character from the source. "
+        "Do NOT paraphrase or reword.\n"
+        "- If no exact sentence matches your question idea, skip that question.\n\n"
         "Test understanding, not just recall. Every question MUST cite its "
         "source book and quote evidence.\n\n"
         "--- Source material ---\n\n" + (material or "(no material provided)"))
     try:
         resp = client.chat.completions.create(
             model=model,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[{"role": "system", "content": system_prompt},
+                      {"role": "user", "content": prompt}],
             temperature=cfg.get("llm_temperature", 0.3),
             max_tokens=int(cfg.get("max_tokens_quiz", 4096) or 4096),
         )
