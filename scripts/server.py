@@ -201,8 +201,8 @@ def default_cfg():
         "quiz_topic_section_pool": 120,
         # Quiz material caps (SESSION 1: consolidated from server.py/agent_loop.py
         # /mcp_server.py so all three sites read the same config keys).
-        "quiz_material_chunks": 100,
-        "quiz_material_words": 3000,
+        "quiz_material_chunks": 10,
+        "quiz_material_words": 500,
         # Quiz generation + audit pipeline (SESSION 3): per-batch generation over
         # the parents walk, the 4-stage accuracy audit, and the structured-output
         # capability probe. Advanced keys, tool-tweakable in config.json.
@@ -2323,15 +2323,12 @@ def api_course_quiz_unit():
 # takes priority over catalog/list intent. Material is retrieved by title
 # match when a work is named, or via the topic-based catalog search otherwise.
 
-# Keep the quiz-material context small enough to fit a tight-window model
-# (e.g. an 8k-token ~2B GGUF). Gathering many long chunks (24 × 300 words ≈
-# 11k tokens) makes every quiz generation blow the context window. These are
-# tuned so the prompt plus the generation template stays well under 8k even
-# with system/tools overhead. These are now config keys (quiz_material_chunks /
-# quiz_material_words, default 10 / 140) consolidated across server.py,
-# agent_loop.py and mcp_server.py.
-QUIZ_MATERIAL_CHUNKS = 100
-QUIZ_MATERIAL_WORDS = 3000
+# Keep the quiz-material context within an 8k-token model's budget.
+# System prompt + formatting ≈ 300 tokens, generation quota ≈ 512 tokens →
+# material budget ≈ 7,400 tokens. With MC=10 × MW=500 each chunk ~250 tokens,
+# total ≈ 5,800 tokens which fits comfortably with margin for output.
+QUIZ_MATERIAL_CHUNKS = 10
+QUIZ_MATERIAL_WORDS = 500
 
 
 def _persist_pending_quiz_spec(conv_id, spec):
