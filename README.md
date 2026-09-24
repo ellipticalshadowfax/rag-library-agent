@@ -102,11 +102,15 @@ requests that bypass the passage-retrieval cap:
   triggers a deep, book-wide summary (map sections → one streamed reduce call)
   instead of a single shallow pass.
 - **"quiz me on [topic/work]"** — generates structured practice questions with
-  collapsible answers and per-question source citations.
+  collapsible answers and per-question source citations. For the full quiz
+  pipeline (planning, generation audit, grading analytics, spaced repetition,
+  exports), see **[quiz.md](quiz.md)**.
 
 ### Study tab: builder, player, review, course & exports
 
-The **Study** tab turns quiz generation into a full study loop:
+The **Study** tab turns quiz generation into a full study loop. The entire pipeline
+— planning, audited generation, grading, spaced repetition via FSRS, and multiple
+export formats — is documented in **[quiz.md](quiz.md)**. Here's a quick overview:
 
 - **Builder** — plan an editable quiz against a whole work, explicit sections,
   or a free topic (optionally weighted toward units you've been missing), pick a
