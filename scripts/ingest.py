@@ -14,8 +14,6 @@ import time
 import random
 from pathlib import Path
 
-os.environ["CUDA_VISIBLE_DEVICES"] = ""  # Force CPU for embeddings
-
 import chromadb
 import fitz  # PyMuPDF
 import torch
@@ -25,7 +23,7 @@ console = Console()
 
 from agent import tokenize
 
-from _paths import merge_local_config, rag_root
+from _paths import merge_local_config, rag_root, resolve_device
 
 EXTENSIONS_TEXT = {".pdf", ".epub", ".mobi", ".djvu", ".txt", ".html", ".htm"}
 
@@ -1090,8 +1088,9 @@ def ingest(target: str, set_name: str, cfg: dict, force: bool = False, only_path
     # Initialize embedder
     console.print(f"[dim]Loading embedding model: {embed_model}...[/dim]")
     from sentence_transformers import SentenceTransformer
+    dev = resolve_device(cfg.get("embed_device"))
     torch.set_num_threads(os.cpu_count() or 8)
-    embedder = SentenceTransformer(embed_model, device=cfg.get("embed_device", "cpu"))
+    embedder = SentenceTransformer(embed_model, device=dev)
     if hasattr(embedder, "prompts") and "passage" not in embedder.prompts:
         embedder.prompts.update({"passage": "passage: ", "query": "query: "})
     console.print(f"[dim]Embedder ready (dim={embedder.get_sentence_embedding_dimension()}, "

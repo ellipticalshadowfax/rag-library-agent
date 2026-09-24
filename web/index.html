@@ -311,10 +311,11 @@
         <div>
           <label>Embedding device</label>
           <select id="cfgEmbedDevice">
+            <option value="auto">Auto</option>
             <option value="cpu">CPU</option>
             <option value="gpu">GPU (CUDA)</option>
-            <option value="mps">MPS (Apple Silicon)</option>
           </select>
+          <div class="small muted" id="cfgEmbedDeviceNote"></div>
         </div>
       </div>
       <div class="small muted" id="embedMeta"></div>
@@ -853,10 +854,11 @@
         <div>
           <label>Embedding device</label>
           <select id="wizEmbedDevice">
+            <option value="auto">Auto</option>
             <option value="cpu">CPU</option>
             <option value="gpu">GPU (CUDA)</option>
-            <option value="mps">MPS (Apple Silicon)</option>
           </select>
+          <div class="small muted" id="wizEmbedDeviceNote"></div>
         </div>
         <div class="small muted" id="wizEmbedMeta"></div>
         <div class="btn-row">
@@ -1278,7 +1280,7 @@ $('#embedPicker').addEventListener('change', () => {
 async function loadConfig() {
   const c = await api.get('/api/config');
   $('#cfgEmbedModel').value = c.embed_model || '';
-  $('#cfgEmbedDevice').value = c.embed_device || 'cpu';
+  $('#cfgEmbedDevice').value = c.embed_device || 'auto';
   $('#cfgLlmUrl').value = c.llm_base_url || '';
   $('#cfgLlmModel').value = c.llm_model || '';
   $('#cfgLlmApiKey').value = c.llm_api_key_set ? '••••••••' : '';
@@ -1316,6 +1318,33 @@ async function loadConfig() {
   $('#curveInfo').textContent = 'embeddings: ' + (c.embed_model || '');
   renderEmbedPicker();
   updateEmbedMeta();
+  applyGpuGate();
+}
+
+// Grey-out / enable the GPU option based on real GPU availability (hardware +
+// installed GPU libs), from the /api/system probe. Lets users see whether GPU is
+// usable and A/B-test CPU vs GPU speed without hidden config flags.
+async function applyGpuGate() {
+  let gpu = false;
+  try {
+    const sys = await api.get('/api/system');
+    gpu = !!(sys.gpu_available ?? sys.cuda);
+  } catch (e) { /* treat as no-GPU if the probe fails */ }
+
+  const note = gpu
+    ? 'GPU (CUDA) detected \u2014 Auto uses it. Pick CPU to compare CPU-only speed.'
+    : 'GPU unavailable \u2014 install the [gpu] extras and a CUDA driver to enable.';
+
+  [['cfgEmbedDevice', 'cfgEmbedDeviceNote'], ['wizEmbedDevice', 'wizEmbedDeviceNote']]
+    .forEach(function (pair) {
+      const sel = $('#' + pair[0]);
+      const opt = sel && sel.querySelector('option[value="gpu"]');
+      if (opt) { opt.disabled = !gpu; opt.title = gpu ? '' : note; }
+      const noteEl = $(pair[1]);
+      if (noteEl) noteEl.textContent = note;
+      // If a stored/current GPU selection is no longer valid, fall back to auto.
+      if (sel && !gpu && sel.value === 'gpu') sel.value = 'auto';
+    });
 }
 loadConfig();
 
@@ -1602,10 +1631,11 @@ async function checkSetup() {
   $('#wizLlmUrl').value = s.llm.url || '';
   $('#wizLlmModel').value = s.llm.model || '';
   $('#wizEmbedModel').value = s.embed.model || '';
-  $('#wizEmbedDevice').value = s.embed.device || 'cpu';
+  $('#wizEmbedDevice').value = s.embed.device || 'auto';
   renderWizEmbedPicker();
   wizSets = Object.entries(s.sets || {}).map(([name, v]) => ({ name, path: (v && v.path) || '' }));
   renderWizSets();
+  applyGpuGate();
   wizGo(0);
   $('#wizard').classList.remove('hidden');
 }

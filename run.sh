@@ -1,10 +1,24 @@
 #!/usr/bin/env bash
 # RAG Library Agent - one-command launcher for a new machine.
 #
-#   ./run.sh              -> CPU install + start web app
-#   RAG_DEVICE=gpu ./run.sh   -> GPU install (NVIDIA driver + VRAM required)
-#   RAG_PORT=8080 ./run.sh    -> custom port
+#   ./run.sh                        -> CPU install + start web app
+#   RAG_DEVICE=gpu ./run.sh         -> GPU install (NVIDIA driver + VRAM required)
+#   RAG_PIP_EXTRAS=rapidocr ./run.sh -> also install the rapidocr OCR backend
+#   RAG_PORT=8080 ./run.sh          -> custom port
 #
+# Install scheme (pyproject.toml):
+#   - default (CPU) installs the CORE deps only, with the lean CPU-only torch
+#     wheel pulled from the PyTorch CPU index. (PyPI's default `torch` now
+#     bundles CUDA on Linux, which would bloat a CPU-only install.)
+#   - optional feature extras add themselves via RAG_PIP_EXTRAS (comma list):
+#       rapidocr   - heavy factored OCR backend (onnxruntime/opencv)
+#       anki       - export quizzes as Anki .apkg decks
+#   - GPU: RAG_DEVICE=gpu pre-installs the CUDA torch wheel off the PyTorch index
+#     (which brings the matching nvidia-* runtime libs), then installs the [gpu]
+#     extra. An extra alone can't express the PyTorch --extra-index-url, so run.sh
+#     handles that step.
+#   - requirements.txt / requirements-gpu.txt are kept as reproducibility lock
+#     files; they are NOT the install path.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -43,11 +57,9 @@ fi
 
 case "$DEVICE" in
   cpu)
-    REQ_FILE="requirements.txt"
     echo "==> Install mode: CPU (torch CPU wheel, no CUDA libraries)"
     ;;
   gpu)
-    REQ_FILE="requirements-gpu.txt"
     echo "==> Install mode: GPU (CUDA torch + nvidia libraries)"
     ;;
   *)
@@ -55,6 +67,19 @@ case "$DEVICE" in
     exit 1
     ;;
 esac
+
+# Optional feature extras (comma list, e.g. "rapidocr,anki")
+PIP_EXTRAS="${RAG_PIP_EXTRAS:-}"
+
+# CUDA wheel line used for GPU installs. Overridable. cu126 is verified with this
+# project's torch 2.14.0 pin and CUDA 12.x system toolkits (Pascal+ cards).
+# Set RAG_CUDA_VERSION=cu128 etc. for a different driver/toolkit.
+CUDA_LINE="${RAG_CUDA_VERSION:-cu126}"
+CUDA_INDEX="https://download.pytorch.org/whl/${CUDA_LINE}"
+# PyTorch CPU-only wheel index. Used so the default install stays lean: PyPI's
+# default `torch` wheel on Linux now bundles CUDA (~870 MB+), whereas the CPU-only
+# wheel is ~200 MB and needs no CUDA/nvidia libs.
+CPU_INDEX="https://download.pytorch.org/whl/cpu"
 
 # 1. Create venv if needed
 if [ ! -x "$HERE/.venv/bin/python" ]; then
@@ -66,24 +91,44 @@ fi
 echo "==> Ensuring dependencies are installed..."
 "$HERE/.venv/bin/python" -m pip install -q --upgrade pip 2>/dev/null || true
 
-if [ "$DEVICE" = "cpu" ]; then
-  # Pre-install torch CPU wheel first — this prevents uv from resolving torch's
-  # CUDA metadata from PyPI when the extra-index-url is used below.
-  uv pip install "torch==2.14.0+cpu" \
-    --index-url "https://download.pytorch.org/whl/cpu" \
+EXTRA_FLAGS=""
+if [ -n "$PIP_EXTRAS" ]; then
+  EXTRA_FLAGS="[${PIP_EXTRAS}]"
+fi
+
+if [ "$DEVICE" = "gpu" ]; then
+  # GPU: install CUDA torch first from the PyTorch index (brings nvidia libs).
+  # This prevents uv/pip from resolving torch's CUDA metadata from PyPI when the
+  # extra-index-url is used below.
+  uv pip install "torch" \
+    --index-url "${CUDA_INDEX}" \
     --python "$HERE/.venv/bin/python"
-  uv pip install -r "$REQ_FILE" \
+  # Then install the app + [gpu] extra + any user extras.
+  GPU_EXTRAS="gpu"
+  if [ -n "$PIP_EXTRAS" ]; then
+    GPU_EXTRAS="${PIP_EXTRAS},gpu"
+  fi
+  uv pip install -e ".[${GPU_EXTRAS}]" \
+    --extra-index-url "${CUDA_INDEX}" \
     --extra-index-url "https://pypi.org/simple" \
     --python "$HERE/.venv/bin/python"
 else
-  uv pip install -r "$REQ_FILE" --python "$HERE/.venv/bin/python"
+  # CPU: install the lean CPU-only torch wheel first (PyPI's default torch now
+  # bundles CUDA on Linux ~870MB+; the +cpu wheel is ~200MB and needs no CUDA),
+  # then the rest of the app from PyPI.
+  echo "  (installing CPU-only torch wheel to keep the default install lean)"
+  uv pip install "torch" \
+    --index-url "${CPU_INDEX}" \
+    --python "$HERE/.venv/bin/python"
+  uv pip install -e ".${EXTRA_FLAGS}" \
+    --extra-index-url "https://pypi.org/simple" \
+    --python "$HERE/.venv/bin/python"
 fi
 
-# 3. First launch: install embedding model (pulled on demand, but fail fast here)
+# 3. First launch: download embedding model (pulled on demand, but fail fast here).
+#    Device is auto-resolved at runtime (CPU unless a usable CUDA is present).
 echo "==> Downloading embedding model (one-time)..."
 "$HERE/.venv/bin/python" - <<'PY'
-import os
-os.environ["CUDA_VISIBLE_DEVICES"] = ""
 from sentence_transformers import SentenceTransformer
 import json, pathlib
 cfg = json.loads(pathlib.Path("config.json").read_text())

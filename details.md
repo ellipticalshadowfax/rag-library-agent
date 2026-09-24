@@ -68,6 +68,28 @@ The model is loaded with the `sentence-transformers` library. You can swap it fo
 a bigger one (`bge-m3`, `Qwen3-Embedding`) in `config.json` if you want higher
 quality and don't mind slower indexing.
 
+#### Does a GPU help here? (benchmarked on a GTX 1060 3 GB)
+
+These small models are small enough that a modern CPU multi-threaded keeps pace
+with a low-end GPU. The app defaults `embed_device` to `auto` (uses any working
+CUDA device), and the Setup tab lets you compare CPU vs GPU directly. On the
+development machine (**16-core CPU, 31 GB RAM, NVIDIA GTX 1060 3 GB**), a quick
+benchmark of the default `multilingual-e5-small` embedder and the
+`ms-marco-MiniLM-L-6-v2` reranker showed essentially no benefit from the GPU:
+
+| Workload | CPU | GPU (GTX 1060) |
+|----------|-----|----------------|
+| Embed 64 chunks | 63.5 ms | 57.5 ms |
+| Embed 256 chunks (ingest-size batch) | 147.7 ms | 148.1 ms |
+| Rerank 64 pairs | 29.6 ms | 31.5 ms |
+
+With the tiny embed/rerank models used here, the GPU wins nothing on batch
+ingest (statistical tie), gains ~10% on small embed batches, and is actually a
+touch *slower* on reranking — PCIe transfer overhead outweighs the compute saved.
+For a bigger embedder (e.g. `bge-m3` or larger) on a more capable card, the GPU
+would start to win; that's what the `embed_device: cuda` option is for. On this
+particular box, leaving it on `auto` (which resolves to CPU) is the right call.
+
 ### Why "passage:" and "query:" prefixes matter
 
 E5-style models were trained so that **passages being indexed** are prepended with

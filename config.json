@@ -1,6 +1,6 @@
 {
   "embed_model": "intfloat/multilingual-e5-small",
-  "embed_device": "cpu",
+  "embed_device": "auto",
   "embed_dim": 384,
   "chunk_tokens": 330,
   "chunk_overlap": 60,

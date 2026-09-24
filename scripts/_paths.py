@@ -45,3 +45,54 @@ def merge_local_config(cfg: dict) -> dict:
     for k, v in load_local_overrides().items():
         cfg[k] = v
     return cfg
+
+
+def cuda_available() -> bool:
+    """True if a usable CUDA device is present and torch is CUDA-capable.
+
+    torch is imported lazily so that lightweight CLI scripts that never do
+    embeddings (e.g. pure bookkeeping) don't pay the torch import cost.
+    """
+    try:
+        import torch
+        return bool(torch.cuda.is_available())
+    except Exception:
+        return False
+
+
+#: Current embedding device key shorthand -> allowed device string.
+_DEVICE_ALIASES = {
+    "mps": "mps",      # Apple Silicon (unused by the UI; kept for manual config)
+    "gpu": "cuda",     # UI shorthand for 'GPU (CUDA)'
+}
+
+
+def resolve_device(preferred=None):
+    """Resolve the embedding/rerank device for this machine.
+
+    ``preferred`` is the config value for ``embed_device`` — one of
+      "auto" (or "", None) -> auto-detect: cuda if usable, else cpu
+      "cpu" / "cuda"       -> exact override (respects user's explicit choice)
+      "gpu"                -> alias for "cuda"
+      "mps"                -> Apple Silicon Metal (manual config only)
+
+    Returns the exact device string to pass to sentence-transformers / torch.
+    """
+    key = (preferred or "auto").strip().lower()
+    key = _DEVICE_ALIASES.get(key, key)
+
+    if key in ("cuda", "mps"):
+        # Explicit override. Respect real availability so an explicit "cuda"
+        # never hands sentence-transformers a missing backend (which the model
+        # loaders would otherwise swallow and drop embeddings entirely).
+        if key == "cuda" and not cuda_available():
+            return "cpu"
+        return key
+
+    # "cpu" is an explicit override — honour it.
+    if key == "cpu":
+        return "cpu"
+
+    # Anything else ("auto", unknown, empty, "gpu" alias unset) -> auto-detect.
+    return "cuda" if cuda_available() else "cpu"
+
