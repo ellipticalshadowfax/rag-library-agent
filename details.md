@@ -507,7 +507,7 @@ These behave consistently across all three chat entry points (web SSE, blocking
 
 ---
 
-## Part 6 — Catalog ranking: how "list books on X" works
+## Part 9 — Catalog ranking: how "list books on X" works
 
 When a query like *"list books about horsemanship"* or *"quiz me on natural horse-*
 *manship"* arrives, the system takes a completely different path from chat retrie-*
