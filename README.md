@@ -17,20 +17,29 @@ Your library files (PDF, EPUB, MOBI) get chunked into small passages and convert
 into embedding vectors using a local sentence-transformers model. These vectors live
 in a ChromaDB index on disk. When you ask a question, the system:
 
-1. Embeds your question and pulls the closest matching chunks from the index.
-2. Reranks those chunks with a cross-encoder for precision.
+1. Retrieves candidates via **hybrid search** — both dense (embedding) and sparse
+   (BM25 lexical) indexes fused by Reciprocal Rank Fusion, then re-ranked by a
+   cross-encoder for precision.
+2. Checks each candidate against a low-relevance guard (proper-noun presence check)
+   to avoid wasting turns on irrelevant matches.
 3. Sends the best chunks as context to an LLM (local or remote) to generate an answer.
 
 The LLM doesn't need to know about your library — it just sees the relevant passages
 as context. This is retrieval-augmented generation (RAG).
 
+For chat, the agent supports **agentic tool-calling** (`chat_mode: "agentic"`): the LLM can call
+`search_library`, `summarize_work`, `list_books`, or `make_quiz` mid-conversation, letting it
+self-direct retrieval rather than accepting one pass. For models without function-calling,
+it falls back to a ReAct text protocol automatically.
 ```
 Your library ──► chunk + embed ──► vector index ──► retrieve + rerank ──► LLM ──► answer
-  (PDF/EPUB)      (local model)     (ChromaDB)      (top chunks)      (any API)
+  (PDF/EPUB)      (local model)     (ChromaDB)      (dense + BM25)      (any API)
 ```
 
 An MCP server is also included so you can use the library as a tool from LM Studio
-or any MCP-compatible chat client, instead of the web UI.
+or any MCP-compatible chat client, instead of the web UI. MCP exposes tools for
+searching, summarizing, listing, quiz planning & building, grading, review queues,
+and even config editing — all share the same persistence layer as the web app.
 
 ## Getting started
 
@@ -130,7 +139,11 @@ export formats — is documented in **[quiz.md](quiz.md)**. Here's a quick overv
 
 ## Configuration
 
-All settings live in `config.json`:
+All settings live in `config.json`, read through a central `_paths` module (with
+`RAG_ROOT` override for symlinked deployments — see **AGENTS.md**). Most knobs are
+tunable via the Setup tab; advanced/internal keys can be edited in config.json directly.
+
+### Core settings
 
 | Key | Default | What it does |
 |-----|---------|--------------|
@@ -145,16 +158,58 @@ All settings live in `config.json`:
 | `ocr_enabled` | `false` | OCR scanned PDFs during ingest |
 | `sets` | — | Named library directories (see below) |
 
-The catalog, summary, and quiz behaviors are tuned by additional keys
-(`catalog_enabled`, `catalog_clarify_threshold`, `catalog_max_rows`,
-`catalog_semantic_pool`, `summary_strategy`, `summary_max_chunks`,
-`summary_context_budget`, `quiz_default_count`, `chat_mode`, `show_thinking`,
-`max_tokens_*`) — see [**tuning.md**](tuning.md) for how they interact.
+### Chat behavior
 
-> **Tuning & portability:** the defaults work well out of the box, but several
-> settings are dataset- or hardware-dependent. See [**tuning.md**](tuning.md) for
-> how the RAG parameters behave across different corpora and machines, and how to
-> re-tune them (including the hard-coded context budget).
+| Key | Default | Description |
+|-----|---------|-------------|
+| `chat_mode` | `agentic` | `"agentic"` = tool-calling loop; `"single"` = one-pass retrieval |
+| `show_thinking` | `false` | Include model reasoning content in output |
+| `context_word_budget` | `3000` | Total words of retrieved context sent to LLM |
+| `chunk_word_cap` | `300` | Per-chunk word truncation for flat/child chunks |
+| `history_char_budget` | `10000` | Max characters of chat history in context |
+| `history_msg_limit` | `12` | Number of past messages included in context |
+
+### Catalog & summarization
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `catalog_enabled` | `true` | Enable catalog/list mode |
+| `catalog_clarify_threshold` | `20` | Titles threshold before showing "all" prompt |
+| `catalog_max_rows` | `200` | Max rows in catalog table |
+| `catalog_semantic_pool` | `500` | Pool size for semantic title search |
+| `summary_strategy` | `map_reduce` | `"map_reduce"` or `"one_pass"` for book summaries |
+| `summary_max_chunks` | `40` | Max chunks for summary material |
+
+### Quiz generation (tuning)
+
+For the full quiz pipeline — planning, audited generation (4-stage parse/grounding/verify/dedupe),
+grading analytics, spaced repetition, course view, and exports — see **[quiz.md](quiz.md)**.
+
+Key knobs:
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `quiz_default_count` | `10` | Default questions when not specified |
+| `quiz_material_chunks` | `10` | Max chunks of retrieved material per prompt |
+| `quiz_material_words` | `500` | Word cap per material chunk |
+| `quiz_batch_parents` | `4` | Parents sent per generation batch |
+| `quiz_parent_word_cap` | `500` | Per-parent word limit during generation |
+| `quiz_max_batches` | `12` | Max batches per unit before giving up |
+| `quiz_verify_pass` | `true` | Run LLM answer-key verification stage |
+| `quiz_grounding_ratio` | `0.85` | Min difflib ratio for excerpt grounding |
+| `quiz_dedupe_jaccard` | `0.75` | Stemmed-Jaccard similarity threshold for dedupe |
+| `llm_structured_output` | `auto` | Probe-enabled JSON generation (`auto`/`off`/`on`) |
+| `quiz_output_format` | `markdown` | Default export format (`markdown`, `gift`, `csv`, `json`, `apkg`) |
+| `quiz_grade_llm` | `true` | Enable LLM-assisted grading for short-answer |
+| `quiz_sample_children` | `50` | Chunks sampled for books without parent-child indexing |
+| `quiz_topic_section_pool` | `120` | Section pool capped when cosine-ranking a topic plan |
+| `quiz_topic_max_works` | `3` | Max works a topic plan ranks units across |
+
+### Tuning
+
+The defaults work well out of the box, but several settings are dataset- or hardware-dependent.
+For guidance on how RAG parameters behave across different corpora and machines, see
+[**tuning.md**](tuning.md) and the detailed reference in **[quiz.md](quiz.md)**.
 
 ### Library sets
 
@@ -176,9 +231,16 @@ with local servers (LM Studio, llama.cpp, vLLM) or cloud APIs.
 ## MCP server (for LM Studio)
 
 If you prefer chatting in LM Studio's GUI, the library can be exposed as an MCP
-server. The model calls `search_library`, `summarize_work`, `list_collections`,
-`list_books`, or `make_quiz` tools while answering questions, grounding its
-responses in your actual books.
+server. Available tools:
+
+- **`search_library`** — hybrid search across your book index
+- **`summarize_work`** — retrieve excerpts of a specific book for summarization
+- **`list_books`** — catalog-style title listing with topic filtering
+- **`make_quiz`** — generate practice questions on a topic or work
+- **`plan_quiz` / `build_quiz`** — plan and build persistent, audited quizzes
+- **`get_quiz` / `grade_answer`** — view and grade generated quizzes
+- **`review_queue` / `study_stats`** — FSRS spaced-repetition review & analytics
+- **`get_config` / `set_config`** — read/write editable config keys
 
 ```bash
 ./run_mcp.sh              # stdio transport (for local LM Studio)
@@ -186,7 +248,9 @@ responses in your actual books.
 ```
 
 Then in LM Studio: Settings → MCP Servers → Add (Local or Remote) and point it
-at the script/command.
+at the script/command. For named books, `make_quiz` paginates Chroma directly to
+gather all matching chunks instead of just the top-k semantically similar ones, so
+you get full-book coverage even for books without parent-child indexing.
 
 ## OCR
 
@@ -214,17 +278,21 @@ For power users who prefer the terminal:
 
 ## Where things live
 
-| File | What it is |
-|------|------------|
+| File / Directory | What it is |
+|------------------|------------|
 | `config.json` | All settings (embed model, LLM endpoint, chunking, etc.) |
+| `config.local.json` | Machine-specific overrides (gitignored) |
 | `index/` | ChromaDB vector index |
-| `manifest.db` | SQLite database tracking file ingest status |
+| `manifest.db` | SQLite database tracking file ingest status + BM25 lexical index |
 | `ingest.log` | Full ingest log |
 | `conversations/` | Saved chat sessions (JSON) |
+| `quizzes/` | Generated quizzes, specs, syllabi, FSRS review store (see **quiz.md**) |
+| `.venv/` | Python virtual environment |
 
-To rebuild from scratch (e.g. after changing the embedding model), delete `index/`
-and `manifest.db`, then re-run ingest. The Setup tab also has a "Force re-embed"
-option per file.
+Runtime data directories (`index/`, `manifest.db`, logs, `conversations/`, `quizzes/`)
+are gitignored. To rebuild from scratch (e.g. after changing the embedding model),
+delete `index/` and `manifest.db`, then re-run ingest. The Setup tab also has a
+"Force re-embed" option per file.
 
 ## Comparison with similar RAG systems
 
