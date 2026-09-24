@@ -33,7 +33,11 @@ def setup_embedder(cfg: dict):
             em = defc.get("embed_model", "intfloat/multilingual-e5-small")
         except Exception:
             em = "intfloat/multilingual-e5-small"
-    edev = cfg.get("embed_device", "cpu")
+    # Auto-resolve device unless an explicit override is set in config. Calling
+    # resolve_device here (at run time, not import time) lets us honour a config
+    # toggle without extra flags.
+    from _paths import resolve_device
+    edev = resolve_device(cfg.get("embed_device"))
     model_key = f"{em}:{edev}"
     if _EMBEDDER_CACHE is not None and _EMBEDDER_CACHE.get("_key") == model_key:
         return _EMBEDDER_CACHE["_model"]
@@ -48,8 +52,6 @@ def setup_embedder(cfg: dict):
     _EMBEDDER_CACHE = {"_key": model_key, "_model": model}
     return model
 from pathlib import Path
-
-os.environ["CUDA_VISIBLE_DEVICES"] = ""  # Force CPU for embeddings
 
 import chromadb
 from openai import OpenAI

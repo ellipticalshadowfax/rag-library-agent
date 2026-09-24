@@ -18,13 +18,12 @@ import time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
-os.environ["CUDA_VISIBLE_DEVICES"] = ""  # Force CPU for embeddings
 os.environ.setdefault("HF_HUB_OFFLINE", "1")  # Skip HuggingFace remote checks; models cached from first-run
 
 from flask import Flask, jsonify, request, send_from_directory, Response
 from flask_cors import CORS
 
-from _paths import SECRET_KEYS, rag_root
+from _paths import SECRET_KEYS, cuda_available, rag_root, resolve_device
 
 RAG_ROOT = rag_root()
 SCRIPTS_DIR = RAG_ROOT / "scripts"
@@ -162,7 +161,7 @@ def default_cfg():
     #   rerank_enabled / rerank_model — cross-encoder re-scoring (adds latency).
     return {
         "embed_model": "intfloat/multilingual-e5-small",
-        "embed_device": "cpu",
+        "embed_device": "auto",
         "embed_dim": 384,
         "chunk_tokens": 330,
         "chunk_overlap": 60,
@@ -249,7 +248,7 @@ def default_cfg():
         "fiction_tags": ["Fiction", "Short Stories", "Literary"],
         "ocr_enabled": False,
         "ocr_merge": True,
-        "ocr_backend": "rapidocr",
+        "ocr_backend": "tesseract",
         "ocr_char_threshold": 50,
         "ocr_languages": ["en"],
         "sets": {},
@@ -299,7 +298,7 @@ def cfg_float(cfg: dict, key: str, default: float, lo=None, hi=None) -> float:
 CONFIG_META = {
     # Model / embedding
     "embed_model":       {"label": "Embed model", "group": "Model", "advanced": False, "editable": True, "description": "Sentence-transformers embedding model id."},
-    "embed_device":      {"label": "Embed device", "group": "Model", "advanced": False, "editable": True, "description": "Device used for embeddings (cpu)."},
+    "embed_device":      {"label": "Embed device", "group": "Model", "advanced": False, "editable": True, "description": "auto (recommended, uses GPU if available) | cpu | cuda."},
     "embed_dim":         {"label": "Embed dim", "group": "Model", "advanced": False, "editable": True, "description": "Embedding dimensionality for the collection."},
 
     # Indexing
@@ -647,7 +646,7 @@ def start_ingest(target, set_name, force=False, only=None):
         message="Starting \u2014 loading embedding model / scanning directory\u2026"
     )
 
-    env = dict(os.environ, CUDA_VISIBLE_DEVICES="")
+    env = dict(os.environ)  # child ingest auto-resolves embed device (CPU/GPU)
     log_path = RAG_ROOT / "ingest.log"
     with open(log_path, "w") as logf:
         proc = subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT, env=env)
@@ -836,7 +835,7 @@ def start_ocr(target, mode="merge", force=False, only=None, languages=None, back
         running=True, paused=False, finished=False, completed=False, total=0, current=0,
         done=0, skipped=0, errors=0, target=target, mode=mode, started_at=time.time()
     )
-    env = dict(os.environ, CUDA_VISIBLE_DEVICES="")
+    env = dict(os.environ)  # child OCR/ingest process resolves device itself
     log_path = RAG_ROOT / "ocr.log"
     with open(log_path, "w") as logf:
         proc = subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT, env=env)
@@ -888,7 +887,7 @@ def get_chat_reranker():
         try:
             from sentence_transformers import CrossEncoder
             _reranker["model"] = model
-            _reranker["obj"] = CrossEncoder(model, device=cfg.get("embed_device", "cpu"))
+            _reranker["obj"] = CrossEncoder(model, device=resolve_device(cfg.get("embed_device")))
         except Exception as e:
             print(f"[chat] reranker load failed, reranking disabled: {e}")
             _reranker["model"] = model
@@ -938,11 +937,15 @@ def api_config_set():
 @app.route("/api/system")
 def api_system():
     llm = check_llm()
+    cfg = load_cfg()
+    gpu = cuda_available()
     return jsonify({
         "llm": llm,
         "lmstudio": llm,  # backward-compatible alias
         "source_dirs": detect_source_dirs(),
-        "cuda": False,
+        "cuda": gpu,                      # usable CUDA present (hw + torch build)
+        "gpu_available": gpu,
+        "embed_device_resolved": resolve_device(cfg.get("embed_device")),
         "drives": detect_source_dirs(),
     })
 
@@ -1048,7 +1051,7 @@ def _load_embed_model(model: str, device: str):
         watcher = threading.Thread(target=_watch, daemon=True)
         watcher.start()
         try:
-            embedder = SentenceTransformer(model, device=device or "cpu")
+            embedder = SentenceTransformer(model, device=resolve_device(device))
             dim = embedder.get_sentence_embedding_dimension()
         finally:
             poll.set()
@@ -1085,7 +1088,7 @@ def api_embed_load():
         if EMBED_LOAD_STATE["running"]:
             return jsonify({"ok": False,
                             "error": "A model load is already in progress."}), 409
-    device = data.get("device") or "cpu"
+    device = data.get("device") or "auto"
     threading.Thread(target=_load_embed_model, args=(model, device),
                      daemon=True).start()
     return jsonify({"ok": True})
@@ -1102,7 +1105,7 @@ def api_embed_apply():
     data = request.get_json(force=True) or {}
     cfg = load_cfg()
     model = (data.get("model") or "").strip()
-    device = data.get("device") or cfg.get("embed_device", "cpu")
+    device = data.get("device") or cfg.get("embed_device", "auto")
     dim = data.get("dim")
     if model:
         cfg["embed_model"] = model

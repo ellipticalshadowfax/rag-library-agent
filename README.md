@@ -55,7 +55,7 @@ chmod +x run.sh
 
 That single command:
 - Creates a Python virtual environment in `.venv/`
-- Installs all dependencies (torch CPU wheels, sentence-transformers, ChromaDB, Flask, etc.)
+- Installs the **core** dependencies from `pyproject.toml` (torch CPU wheels, sentence-transformers, ChromaDB, Flask, MCP, etc.). Installing extras pulls in optional heavy deps only if you ask for them.
 - Downloads the embedding model once (~50 MB)
 - Checks if the LLM API is reachable (warns if not — you can still set it up from the UI)
 - Starts the web app at **http://localhost:5000**
@@ -63,21 +63,36 @@ That single command:
 ### Custom options
 
 ```bash
-RAG_PORT=8080 ./run.sh        # different port
-RAG_HOST=0.0.0.0 ./run.sh     # listen on all interfaces (LAN access)
-RAG_DEVICE=gpu ./run.sh        # GPU install (NVIDIA driver + VRAM needed)
+RAG_PORT=8080 ./run.sh                        # different port
+RAG_HOST=0.0.0.0 ./run.sh                     # listen on all interfaces (LAN access)
+RAG_DEVICE=gpu ./run.sh                       # GPU install (NVIDIA driver + VRAM needed)
+RAG_PIP_EXTRAS=rapidocr ./run.sh              # also install the optional rapidocr OCR backend
+RAG_PIP_EXTRAS=rapidocr,anki ./run.sh         # plus Anki .apkg quiz export
 ```
+
+Optional extras (installed via `RAG_PIP_EXTRAS` or `pip install ".[extra]"`):
+
+| Extra | Adds | Why it's optional |
+|-------|------|-------------------|
+| (none — default OCR) | `pytesseract` (system `tesseract` binary) | Default; light & fast |
+| `rapidocr` | `rapidocr-onnxruntime`, `onnxruntime`, `onnx`, `opencv-python` | Heavy (~0.5–1 GB) factorized OCR backend; install only for higher-accuracy scanned-PDF OCR |
+| `anki` | `genanki` | Anki `.apkg` deck export |
+| `gpu` | CUDA torch + NVIDIA runtime libs | Requires a CUDA-capable GPU; resolved by run.sh via the PyTorch index |
 
 ### Manual setup (if run.sh doesn't work)
 
 ```bash
 python3 -m venv .venv
-# CPU torch first — prevents uv from pulling CUDA wheels
 .venv/bin/pip install uv
-uv pip install torch==2.14.0+cpu --index-url https://download.pytorch.org/whl/cpu
-uv pip install -r requirements.txt --extra-index-url https://pypi.org/simple
+# CPU-only torch first — PyPI's default torch bundles CUDA on Linux (~870MB+);
+# the +cpu wheel is ~200MB. (For GPU, use RAG_DEVICE=gpu ./run.sh instead.)
+uv pip install "torch" --index-url https://download.pytorch.org/whl/cpu --python .venv/bin/python
+uv pip install -e . --python .venv/bin/python
 .venv/bin/python scripts/server.py
 ```
+
+Optional extras: append to `-e .` as `-e ".[rapidocr]"` / `-e ".[anki]"`, or for
+GPU run `RAG_DEVICE=gpu ./run.sh`.
 
 ## Using the app
 
@@ -346,8 +361,11 @@ sits alongside several well-known ones:
 
 ## Notes
 
-- **GPU install is for future use only.** The app currently forces CPU at runtime
-  for embeddings regardless of install mode. OCR is also CPU-only.
+- **GPU is selectable and verified working.** The app auto-detects a usable CUDA
+  device (see the Embedding Device setting in the Setup tab: `auto`, `cpu`, or
+  `gpu`). Run `RAG_DEVICE=gpu ./run.sh` (or `RAG_CUDA_VERSION=cu126` per your
+  toolkit) to install the GPU extras; the app then runs embeddings + reranking on
+  CUDA automatically. OCR is always CPU-bound.
 - **Fiction classification** depends on Calibre tags. Untagged books default to
   non-fiction.
 - **Embedding model tradeoffs:** The default (`multilingual-e5-small`) is fast on

@@ -24,7 +24,7 @@ from pathlib import Path
 
 import agent
 
-from _paths import rag_root
+from _paths import rag_root, resolve_device
 
 RAG_ROOT = rag_root()
 EVALS_DIR = RAG_ROOT / "evals"
@@ -73,7 +73,7 @@ def _get_reranker(cfg):
             from sentence_transformers import CrossEncoder
             print(f"[eval] loading reranker: {model}...")
             _reranker["obj"] = CrossEncoder(
-                model, device=cfg.get("embed_device", "cpu"))
+                model, device=resolve_device(cfg.get("embed_device")))
             _reranker["model"] = model
         except Exception as e:
             print(f"[eval] reranker unavailable, skipping rerank: {e}")

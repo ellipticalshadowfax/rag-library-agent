@@ -1,0 +1,75 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rag-library-agent"
+version = "0.1.0"
+description = "Local, self-hosted RAG document assistant for your ebook/PDF library"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    # Web app
+    "Flask>=3",
+    "flask-cors>=6",
+
+    # Vector store / retrieval
+    "chromadb>=1.5",
+
+    # Embeddings / reranking (pulls transformers + tokenizers)
+    "sentence-transformers>=6",
+    "torch>=2.4",
+    "numpy>=1.26",
+    "rank_bm25>=0.2",
+    "snowballstemmer>=2.2",
+
+    # Document parsing
+    "PyMuPDF>=1.24",
+    "EbookLib>=0.18",
+    "mobi>=0.4",
+    "lxml>=5",
+
+    # Chat / agent
+    "openai>=3",
+    "mcp>=1,<2",
+    "fsrs>=6",
+
+    # OCR (default backend = tesseract via pytesseract wrapper; no heavy deps)
+    "pytesseract>=0.3",
+
+    # Utilities
+    "rich>=13",
+    "huggingface-hub>=0.30",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+# Optional rapidocr OCR backend (replaces tesseract). Heavy onnxruntime/opencv tail.
+rapidocr = [
+    "rapidocr-onnxruntime>=1.4",
+    "onnxruntime>=1.20",
+    "onnx>=1.16",
+    "opencv-python>=4.10",
+]
+
+# Optional Anki .apkg export (genanki). Small.
+anki = [
+    "genanki>=0.13",
+]
+
+# GPU: CUDA torch + NVIDIA runtime libs.
+#
+# A pip extra cannot specify the PyTorch CUDA --extra-index-url, so the CUDA
+# torch wheel (torch==2.x+cuNN, which transitively installs the nvidia-* runtime
+# libs pinned in requirements-gpu.txt) is resolved by run.sh via that index.
+# This extra exists as an opt-in marker; run.sh treats it specially.
+#   ./run.sh                  -> CPU install (PyPI torch, naturally CPU on Linux)
+#   RAG_DEVICE=gpu ./run.sh   -> resolves CUDA torch + this extra
+gpu = []
+
+# The app is launched via scripts/server.py directly (not installed as a package),
+# so setuptools installs metadata only — scripts/*.py remain source files in-place.
+[tool.setuptools]
+packages = []
+py-modules = []

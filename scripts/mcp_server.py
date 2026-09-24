@@ -32,12 +32,11 @@ import sqlite3
 import sys
 from pathlib import Path
 
-os.environ["CUDA_VISIBLE_DEVICES"] = ""  # Force CPU for embeddings
 os.environ.setdefault("HF_HUB_OFFLINE", "1")  # Skip HuggingFace remote checks; models cached from first-run
 
 from mcp.server.fastmcp import FastMCP
 
-from _paths import rag_root
+from _paths import rag_root, resolve_device
 
 RAG_ROOT = rag_root()
 DEFAULT_SET = "veracrypt1"
@@ -115,7 +114,7 @@ def _reranker():
                 model = cfg.get("rerank_model")
                 with _muted_stdout():
                     _resources[key] = CrossEncoder(
-                        model, device=cfg.get("embed_device", "cpu"))
+                        model, device=resolve_device(cfg.get("embed_device")))
             except Exception as e:
                 print(f"[mcp] reranker unavailable: {e}")
                 _resources[key] = None

@@ -1,60 +1,74 @@
 # Known Issues
 
-## 1. Unexpected full reingest of a collection (not incremental)
+Status legend: **OPEN** (still a real problem) · **MINOR** (mostly fixed; small
+edge case remains) · **FIXED** (resolved in current code).
+
+## 1. Unexpected full reingest of a collection (not incremental) — OPEN
 
 Updating/cloning collection `veracrypt1` via the web UI sometimes reprocesses the
 entire library instead of only changed files. The web UI does **not** pass
-`--force` by default (`scripts/server.py:1087`, `web/index.html:1440,1468`), so a
-full reingest is caused by one of the following:
+`--force` by default, so a full reingest is caused by one of the following:
 
-- **Target path changed between runs** (`scripts/ingest.py:952,962`). Change
-  detection keys on `(rel_path, mtime, size)`. If the Veracrypt volume is mounted
-  at a different path between sessions, or a different parent/subdirectory is
-  picked in the folder picker, every `rel_path` is new and every file looks
-  "changed".
-- **`manifest.db` missing/wiped** (`scripts/ingest.py:923`, `server.py:1719-1727`).
-  A fresh `RAG_ROOT`, a deleted manifest, or a prior UI delete of the row-owning
-  collection empties the manifest so `is_current()` returns `False` for all files.
-- **Bulk mtime/size changes on disk**. There is no content-hash check — only
-  stat-based. Copy/restore of the library without `-a`, or tools that rewrite
-  files wholesale, touch every file and trigger a full reindex.
-- **Set-agnostic manifest bookkeeping** (see issue 3 below).
+- **Stat-only change detection** (`scripts/ingest.py:1119-1124`). There is no
+  content-hash check — only `(rel_path, mtime, size)`. Copy/restore of the
+  library without `-a`, or tools that rewrite files wholesale, touch every file
+  and trigger a full reindex. Still the primary residual cause.
+- **`manifest.db` missing/wiped**. A fresh `RAG_ROOT` or a deleted manifest
+  empties the manifest so `is_current()` returns `False` for all files. Inherent
+  to stat-based change detection.
+- **Target path changed between runs** (`scripts/ingest.py:1071-1081`). Change
+  detection keys on `rel_path`, so picking a *different* parent/subdirectory in
+  the folder picker makes every `rel_path` new and every file looks "changed".
+  (Mitigated: the ingest now records `meta.target:<set>` and warns when the
+  target changes; a pure mount-point change with an identical relative tree is
+  still skipped.)
 
-## 2. OCR `ocr_merge` causes repeat reprocessing of all scanned PDFs
+The set-agnostic bookkeeping cause (previously issue 3) is **fixed**: change
+detection is now scoped per set (see #3).
 
-`merge_text_into_pdf()` (`scripts/ingest.py:1038-1039`) modifies the source PDF in
-place, changing its size/mtime, but the manifest stores the **pre-merge** values
-(`ingest.py:1170`). On the next ingest every merged PDF looks changed and is
-reprocessed. Amplified further: `needs_ocr()` returns `True` on any exception
-(`ingest.py:334-342`), so if `pdftotext` is missing from PATH every PDF is flagged
-every run and the merge branch re-merges over existing cached OCR.
+## 2. OCR `ocr_merge` causes repeat reprocessing of all scanned PDFs — MINOR
 
-## 3. Manifest is not set-aware: `rel_path` globally unique, `is_current()` ignores `set_name`
+`merge_text_into_pdf()` (`scripts/ingest.py:554`) modifies the source PDF in
+place, changing its size/mtime. Fixed: after a successful merge the fresh
+post-merge `mtime`/`size` are written back into the manifest
+(`ingest.py:1233-1236,1369`), and the merge is gated on the OCR cache being
+newer than the PDF (`ingest.py:1229-1239`), so a merged PDF is seen as current
+and never re-merged.
 
-`files.rel_path` is `UNIQUE` across all sets (`scripts/ingest.py:108`) and
-`is_current()` never consults `set_name` (`ingest.py:149-153`). Consequences:
+Residual: `needs_ocr()` still returns `True` on any exception
+(`scripts/ingest.py:487-488`), so if `pdftotext` is missing from PATH every PDF
+is flagged as OCR-needing every run.
 
-- Set B ingesting a directory already recorded by set A silently populates
-  nothing (everything is "current") and bypasses the upsert.
-- If set A (the row owner) is deleted, `_drop_manifest_set` deletes all shared
-  rows → set B's next ingest does a full reingest.
-- `ON CONFLICT(rel_path) DO UPDATE ... set_name=excluded.set_name`
-  (`ingest.py:161-170`) means the set that ingested last "steals" ownership of
-  every shared row.
+## 3. Manifest is not set-aware — FIXED
 
-## 4. Stale chunks orphaned in Chroma after a path change
+`files.rel_path` was `UNIQUE` across all sets; keys now include `set_name`:
+`UNIQUE(rel_path, set_name)` (`scripts/ingest.py:118`) and
+`PRIMARY KEY (parent_id, set_name)` for `parents` (`ingest.py:145`).
+`_migrate_legacy_schemas()` (`ingest.py:157-240`) rebuilds legacy tables with
+scoped keys; `is_current()` consults `set_name` (`ingest.py:242-248`); upserts
+conflict on `(rel_path, set_name)`; and `_drop_manifest_set()`
+(`server.py:3326-3341`) deletes only that set's rows, so deleting the row-owning
+collection no longer wipes shared rows for other sets.
 
-The stale-chunk cleanup `collection.delete(where={"source": rel})`
-(`scripts/ingest.py:1102-1106`) deletes by the **new** rel path only, so after a
-target-path change the old-path chunks are orphaned in Chroma and the collection
-grows with duplicates. The manifest likewise keeps dead rows for rel paths no
-longer present under the target (no pruning).
+## 4. Stale chunks orphaned in Chroma after a path change — MINOR
 
-## 5. `agent.py` hardcodes the manifest path instead of using `rag_root()`
+Previously, stale-chunk cleanup deleted by the **new** rel path only
+(`collection.delete(where={"source": rel})`), orphaning old-path chunks and
+leaving dead manifest rows. Fixed: a prune pass (`scripts/ingest.py:1161-1183`)
+walks this set's manifest rows and, for any rel path not seen in the walk whose
+recorded abs path no longer exists, deletes the Chroma chunks, the manifest row,
+and the parents row.
 
-`scripts/agent.py:525` (BM25 hydration) and `scripts/agent.py:688` (parent-text
-store) use `Path(__file__).resolve().parent.parent / "manifest.db"`, while
-`ingest.py`, `server.py`, and `mcp_server.py` all use `rag_root()`. In a
-symlinked deployment where data lives outside the code root, `agent.py` reads a
-different/nonexistent manifest → BM25 falls back to rebuilding from Chroma and
-parent texts load as `{}`. Retrieval-side; not a reingest trigger.
+Residual edge case: pruning requires `not Path(abs_path).exists()`. If the set
+is re-pointed to a different directory while the old files still exist on disk
+(e.g. the old library is still mounted elsewhere), old rel paths fall outside
+the prune condition and their chunks stay orphaned. Pruning also skips
+`only_path` runs.
+
+## 5. `agent.py` hardcodes the manifest path instead of using `rag_root()` — FIXED
+
+All manifest accesses in `agent.py` (BM25 hydration, parent-text store, title
+matching) now use `rag_root() / "manifest.db"` (`scripts/agent.py:251,677,857`),
+matching `ingest.py`, `server.py`, and `mcp_server.py`. In a symlinked
+deployment where data lives outside the code root, `agent.py` now resolves the
+same manifest as the rest of the app.
