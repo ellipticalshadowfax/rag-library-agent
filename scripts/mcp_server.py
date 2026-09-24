@@ -333,6 +333,11 @@ def make_quiz(topic: str, set_name: str = "", count: int = 10) -> str:
     """Generate a structured practice quiz on a topic or a named work, with
     collapsible answers and per-question source citations.
 
+    For a named book (title match), this paginates Chroma directly to gather
+    ALL matching chunks — not just the top-k semantically similar ones — so
+    the LLM gets full coverage of the book's content. For topic queries, it
+    falls back to semantic search across multiple titles.
+
     Args:
       topic: the topic or book title to quiz on.
       set_name: which index collection (see list_collections). Leave empty for the default.
@@ -351,13 +356,60 @@ def make_quiz(topic: str, set_name: str = "", count: int = 10) -> str:
 
     matched = agent._match_titles(topic, set_name, limit=4)
     material = None
-    MC = max(1, min(int(cfg.get("quiz_material_chunks", 10) or 10), 100))
-    MW = max(10, min(int(cfg.get("quiz_material_words", 140) or 140), 5000))
+    MC = max(1, min(int(cfg.get("quiz_material_chunks", 100) or 100), 500))
+    MW = max(10, min(int(cfg.get("quiz_material_words", 3000) or 3000), 20000))
     with _muted_stdout():
         if matched:
-            where = {"title": {"$in": matched}}
-            hits = agent.retrieve(", ".join(matched), _embedder(), collection,
-                                  top_k=MC, cfg=cfg, where_extra=where)
+            # Named book detected — paginate Chroma directly to get ALL chunks
+            # for this book, bypassing semantic top-k limits.
+            batch_size = 500
+            all_hits = []
+            offset = 0
+            while True:
+                where = {"title": {"$in": matched}}
+                result = collection.get(offset=offset, limit=batch_size,
+                                        include=["documents", "metadatas"],
+                                        where=where)
+                ids = result.get("ids") or []
+                if not ids:
+                    break
+                docs = result.get("documents") or []
+                metadatas = result.get("metadatas") or []
+                for i, doc in enumerate(docs):
+                    doc = (doc or "").strip()
+                    meta = metadatas[i] or {}
+                    # Skip bibliographic / metadata-only chunks
+                    lower_doc = doc.lower()
+                    if any(skip in lower_doc for skip in [
+                            'isbn', 'bf575', 'to my wife', 'contents']):
+                        continue
+                    if len(doc.split()) < 30:
+                        continue
+                    all_hits.append({
+                        "id": ids[i],
+                        "document": doc,
+                        "metadata": {
+                            "title": meta.get("title", ""),
+                            "source": meta.get("source", ""),
+                            "section_title": meta.get("section_title", ""),
+                        },
+                    })
+                offset += batch_size
+
+            # Deduplicate by first-300-chars key
+            seen = set()
+            unique_hits = []
+            for h in all_hits:
+                key = h["document"][:300]
+                if key not in seen:
+                    seen.add(key)
+                    unique_hits.append(h)
+
+            # Shuffle for variety, then take up to MC chunks
+            import random as _random
+            _random.seed(42)
+            _random.shuffle(unique_hits)
+            hits = unique_hits[:MC]
             material = agent.build_context(hits[:MC], max_words=MW)
         else:
             books = catalog.find_books(topic, set_name, None, cfg,
@@ -576,7 +628,8 @@ def get_config(keys: list = None) -> str:
                "agentic_enabled", "rerank_enabled", "lexical_backend",
                "chunking_strategy", "fsrs_enabled", "quiz_default_count",
                "quiz_batch_parents", "quiz_verify_pass", "quiz_grounding_ratio",
-               "quiz_output_format"]
+               "quiz_output_format", "quiz_material_chunks", "quiz_material_words",
+               "quiz_sample_children"]
     return "\n".join(f"{k}: {cfg.get(k)}" for k in notable)
 
 
@@ -621,6 +674,7 @@ def _editable_config_keys():
         "quiz_default_count", "quiz_output_format", "quiz_depth",
         "quiz_topic_max_works", "quiz_topic_section_pool",
         "quiz_material_chunks", "quiz_material_words",
+        "quiz_sample_children",
     }
 
 

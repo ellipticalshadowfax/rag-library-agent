@@ -721,9 +721,11 @@ def build_quiz(spec, set_name, cfg, client, stream_cb=None, progress_cb=None,
 def _sample_children(unit, set_name, cfg, collection, embedder, word_cap) -> list:
     """Even-spread child-chunk sampling fallback for non-parent_child indexes.
 
-    Returns a list of pseudo-parent dicts (as much as could be sampled) or []
-    when no collection/embedder is available. This is a best-effort fallback so
-    generation never hard-fails on an index without parents.
+    For books that were ingested with flat/child chunking (no parent-child
+    sections in manifest.db), this samples uniformly across all matching
+    chunks so the LLM gets broad coverage instead of just a handful.
+    Samples up to ``max_samples`` evenly-spaced chunks via Chroma pagination
+    (not semantic search) — typically dozens of chunks from a full book.
     """
     try:
         import agent as _agent
@@ -732,26 +734,60 @@ def _sample_children(unit, set_name, cfg, collection, embedder, word_cap) -> lis
         work = unit.get("work") or ""
         if not work:
             return []
-        hits = _agent.retrieve(
-            unit.get("title") or work, embedder, collection,
-            top_k=min(40, int(cfg.get("retrieval_top_k", 10) or 10) * 4),
-            where_extra={"title": {"$in": [work]}} if work else None)
-        if not hits:
+
+        # Read configurable limits
+        max_samples = int(cfg.get("quiz_sample_children", 50) or 50)
+        batch_size = 500
+
+        # Paginate Chroma directly to get ALL chunks for this title
+        # (semantic retrieve would lose most due to top-k limit)
+        all_ids = []
+        offset = 0
+        while True:
+            where = {"title": {"$in": [work]}}
+            result = collection.get(offset=offset, limit=batch_size,
+                                    include=["documents", "metadatas"],
+                                    where=where)
+            ids = result.get("ids") or []
+            if not ids:
+                break
+            docs = result.get("documents") or []
+            metadatas = result.get("metadatas") or []
+            for i, doc_id in enumerate(ids):
+                doc = (docs[i] or "").strip()
+                meta = metadatas[i] or {}
+                # Skip metadata-only / bibliographic chunks
+                lower_doc = doc.lower()
+                if any(skip in lower_doc for skip in ['isbn', 'bf575', 'to my wife', 'contents']):
+                    continue
+                if len(doc.split()) < 30:
+                    continue
+                all_ids.append((doc_id, doc, meta))
+            offset += batch_size
+
+        if not all_ids:
             return []
-        n = len(hits)
-        stride = max(1, n // 6)
+
+        n = len(all_ids)
+        # Evenly space samples across the entire book
+        stride = max(1, n // max_samples)
         sampled = []
-        for h in hits[::stride][:6]:
-            meta = h.get("metadata") or {}
-            text = h.get("document") or ""
-            if not text:
+        seen = set()
+        for idx in range(0, n, stride):
+            doc_id, doc_text, meta = all_ids[idx]
+            key = doc_text[:200]
+            if key in seen:
                 continue
+            seen.add(key)
             sampled.append({
-                "parent_id": h.get("id") or meta.get("parent_id") or "",
+                "parent_id": doc_id,
                 "title": meta.get("title") or work,
                 "section_title": meta.get("section_title") or "",
-                "text": text,
+                "text": doc_text,
             })
+            if len(sampled) >= max_samples:
+                break
+
         return sampled
     except Exception as e:
         print(f"[quiz_build] child sampling failed ({e})", flush=True)
