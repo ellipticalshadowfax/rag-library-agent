@@ -356,8 +356,8 @@ def make_quiz(topic: str, set_name: str = "", count: int = 10) -> str:
 
     matched = agent._match_titles(topic, set_name, limit=4)
     material = None
-    MC = max(1, min(int(cfg.get("quiz_material_chunks", 100) or 100), 500))
-    MW = max(10, min(int(cfg.get("quiz_material_words", 3000) or 3000), 20000))
+    MC = max(1, min(int(cfg.get("quiz_material_chunks", 10) or 10), 100))
+    MW = max(10, min(int(cfg.get("quiz_material_words", 500) or 500), 20000))
     with _muted_stdout():
         if matched:
             # Named book detected — paginate Chroma directly to get ALL chunks
