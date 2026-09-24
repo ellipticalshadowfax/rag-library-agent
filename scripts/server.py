@@ -201,14 +201,19 @@ def default_cfg():
         "quiz_topic_section_pool": 120,
         # Quiz material caps (SESSION 1: consolidated from server.py/agent_loop.py
         # /mcp_server.py so all three sites read the same config keys).
-        "quiz_material_chunks": 10,
-        "quiz_material_words": 140,
+        "quiz_material_chunks": 100,
+        "quiz_material_words": 3000,
         # Quiz generation + audit pipeline (SESSION 3): per-batch generation over
         # the parents walk, the 4-stage accuracy audit, and the structured-output
         # capability probe. Advanced keys, tool-tweakable in config.json.
         "quiz_batch_parents": 4,
         "quiz_parent_word_cap": 500,
-        "quiz_max_batches": 12,
+         "quiz_max_batches": 12,
+        # Fallback chunk sampling for non-parent_child indexes (books without
+        # parent-child sections in manifest.db). Paginates Chroma directly to
+        # get evenly-spaced chunks so the LLM sees broad coverage, not just a
+        # handful from semantic search top-k.
+        "quiz_sample_children": 50,
         "quiz_verify_pass": True,
         "quiz_grounding_ratio": 0.85,
         "quiz_dedupe_jaccard": 0.75,
@@ -351,6 +356,7 @@ CONFIG_META = {
     "quiz_batch_parents": {"label": "Quiz batch parents", "group": "Quiz", "min": 1, "max": 50, "advanced": True, "editable": True, "description": "Parents sent per generation/verification batch."},
     "quiz_parent_word_cap": {"label": "Quiz parent word cap", "group": "Quiz", "min": 100, "max": 5000, "advanced": True, "editable": True, "description": "Per-parent word cap when building generation material."},
     "quiz_max_batches": {"label": "Quiz max batches", "group": "Quiz", "min": 1, "max": 200, "advanced": True, "editable": True, "description": "Max parent-batches per unit before giving up on the allocation."},
+    "quiz_sample_children": {"label": "Sample children count", "group": "Quiz", "min": 5, "max": 500, "advanced": True, "editable": True, "description": "For non-parent_child books: number of evenly-spaced chunks to sample from Chroma (paginates directly). Higher = broader coverage but larger prompts."},
     "quiz_verify_pass": {"label": "Quiz verify pass", "group": "Quiz", "advanced": True, "editable": True, "description": "Run the inline LLM answer-key verification stage (true/false)."},
     "quiz_grounding_ratio": {"label": "Quiz grounding ratio", "group": "Quiz", "min": 0, "max": 1, "advanced": True, "editable": True, "description": "Min difflib ratio for an excerpt to be considered grounded in its parent."},
     "quiz_dedupe_jaccard": {"label": "Quiz dedupe Jaccard", "group": "Quiz", "min": 0, "max": 1, "advanced": True, "editable": True, "description": "Stemmed-token Jaccard at/above which a question is dropped as a duplicate."},
@@ -2324,8 +2330,8 @@ def api_course_quiz_unit():
 # with system/tools overhead. These are now config keys (quiz_material_chunks /
 # quiz_material_words, default 10 / 140) consolidated across server.py,
 # agent_loop.py and mcp_server.py.
-QUIZ_MATERIAL_CHUNKS = 10
-QUIZ_MATERIAL_WORDS = 140
+QUIZ_MATERIAL_CHUNKS = 100
+QUIZ_MATERIAL_WORDS = 3000
 
 
 def _persist_pending_quiz_spec(conv_id, spec):
