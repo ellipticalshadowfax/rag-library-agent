@@ -66,10 +66,13 @@ Do not begin implementing the plan: only create the file.
   `scripts/server.py`.
 - Docs: `README.md` (user docs), `details.md` (RAG chain walkthrough),
   `quiz.md` (quiz pipeline), `tuning.md` (parameter guidance), `issues.md`
-  (known issue statuses). Read the relevant one before touching that area.
-- `./plans/improvements.md` — handoff review of known issues (S/P/R/U
-  findings, with file:line references). Read before large changes. Note this
-  file lives in `./plans/` and is gitignored.
+  (known issue statuses), `errorsandbugs.md` (full code-review findings with
+  file:line refs and suggested fixes). Read the relevant one before touching
+  that area.
+- `errorsandbugs.md` — current (Oct 2026) full-review findings; read before
+  large changes. `./plans/improvements.md` is the earlier Sep 2026 review
+  (S/P/R/U findings) and is partly superseded; it lives in `./plans/` and is
+  gitignored.
 
 ### Running code
 

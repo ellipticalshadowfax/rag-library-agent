@@ -96,7 +96,7 @@ GPU run `RAG_DEVICE=gpu ./run.sh`.
 
 ## Using the app
 
-Open http://localhost:5000. The app has four tabs:
+Open http://localhost:5000. The app has six tabs:
 
 **Setup** — Configure your library folders, LLM API endpoint, and embedding model.
 There's a folder picker for convenience, and a first-run wizard on fresh installs.
@@ -105,6 +105,10 @@ Saving persists everything to `config.json`.
 **Scan** — A dry run. Counts your files, flags scanned PDFs that need OCR, and
 classifies books as fiction or non-fiction from Calibre tags. Nothing gets indexed.
 
+**OCR** — Run OCR over a folder of scanned PDFs without re-ingesting. Choose the
+engine (Tesseract or RapidOCR) and either write a `.txt` sidecar or merge an
+invisible text layer back into the PDF. See **[OCR](#ocr)** below.
+
 **Ingest** — Builds or updates the vector index. Runs in the background with live
 progress shown on any tab. You can pause, resume, or stop a running job. While
 ingesting, the Chat tab is temporarily locked (to avoid concurrent database access).
@@ -112,6 +116,11 @@ Re-running is incremental — new files are added, existing ones are skipped.
 
 **Chat** — Ask questions. Each answer shows its sources with similarity scores and
 fiction/non-fiction tags. If all your sources are fiction, you get a visible warning.
+
+**Study** — Plan, generate, take, and review quizzes, browse a work's syllabus,
+and export to GIFT/CSV/JSON/Anki. See the
+**[Study tab](#study-tab-builder-player-review-course--exports)** section below and
+**[quiz.md](quiz.md)** for the full pipeline.
 
 ### Browsing, summaries & quizzes
 
@@ -280,6 +289,11 @@ for each file:
 ```
 
 OCR is always CPU-bound and significantly slower than text extraction.
+
+The Tesseract binary is resolved from `TESSERACT_BIN` (env var), then `PATH`
+(`shutil.which("tesseract")`), then an in-code default. Set `TESSERACT_BIN` if
+tesseract is installed somewhere non-standard. See **[tuning.md](tuning.md)**
+for the full resolution order and the other OCR knobs.
 
 ## CLI tools
 

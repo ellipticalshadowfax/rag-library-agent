@@ -3,6 +3,10 @@
 Status legend: **OPEN** (still a real problem) · **MINOR** (mostly fixed; small
 edge case remains) · **FIXED** (resolved in current code).
 
+This file tracks the original issue list only. For the full (Oct 2026) review —
+including items not tracked here, with `file:line` references and suggested
+fixes — see `errorsandbugs.md` in the repo root.
+
 ## 1. Unexpected full reingest of a collection (not incremental) — OPEN
 
 Updating/cloning collection `library` via the web UI sometimes reprocesses the
@@ -65,10 +69,15 @@ is re-pointed to a different directory while the old files still exist on disk
 the prune condition and their chunks stay orphaned. Pruning also skips
 `only_path` runs.
 
-## 5. `agent.py` hardcodes the manifest path instead of using `rag_root()` — FIXED
+## 5. `agent.py` hardcodes the manifest path instead of using `rag_root()` — MINOR
 
 All manifest accesses in `agent.py` (BM25 hydration, parent-text store, title
 matching) now use `rag_root() / "manifest.db"` (`scripts/agent.py:251,677,857`),
 matching `ingest.py`, `server.py`, and `mcp_server.py`. In a symlinked
 deployment where data lives outside the code root, `agent.py` now resolves the
 same manifest as the rest of the app.
+
+Residual: the `cmd_collections` CLI helper still derives its index path from the
+code location (`rag_root = Path(__file__).resolve().parent.parent`,
+`scripts/agent.py:1125`) instead of the `rag_root()` accessor, so `--collections`
+ignores `RAG_ROOT`. (See `errorsandbugs.md` §A17.)
