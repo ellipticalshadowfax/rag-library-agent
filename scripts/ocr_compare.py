@@ -8,7 +8,7 @@ Flow per file:
   3. Score "well-formedness" = weighted confidence - garbage.
   4. Route: Tesseract if its sample quality >= tess_threshold (fast default);
      else RapidOCR if its quality >= rapid_threshold; else flag too_bad.
-  5. OCR the full file with the chosen engine -> ocr/<stem>.txt cache
+  5. OCR the full file with the chosen engine -> ocr/<stem>-<hash>.txt cache
      (the path ingest.py already reads). Resumable: files with an existing
      cache (and non-zero size) are skipped unless --force.
 
@@ -36,7 +36,7 @@ except ImportError:
 
 console = Console()
 
-from _paths import rag_root
+from _paths import rag_root, ocr_cache_name
 
 RAG_ROOT = rag_root()
 SAMPLE_ROOT = Path(os.environ.get("OCR_SAMPLE_DIR", "/tmp/opencode/ocr_samples"))
@@ -419,7 +419,7 @@ def main():
     for idx, fi in enumerate(work, 1):
         rel = fi["rel"]
         stem = Path(rel).stem
-        cache = OCR_CACHE / (stem + ".txt")
+        cache = OCR_CACHE / ocr_cache_name(fi["full"])
         if cache.exists() and cache.stat().st_size > 0 and not args.force:
             report["decisions"][rel] = {
                 "pages": fi["pages"], "size": fi["size"],

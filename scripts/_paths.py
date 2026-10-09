@@ -12,6 +12,7 @@ next to the code. If unset, the code-relative default is used (the normal
 in-place install).
 """
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -45,6 +46,26 @@ def merge_local_config(cfg: dict) -> dict:
     for k, v in load_local_overrides().items():
         cfg[k] = v
     return cfg
+
+
+def ocr_cache_name(fpath) -> str:
+    """Return a collision-safe OCR cache filename for a source file.
+
+    Keying the OCR cache by filename stem alone (``<stem>.txt``) lets two
+    different PDFs that share a stem (e.g. ``Chapter 1.pdf`` in two folders, or
+    the same filename across sets) read each other's OCR text; in merge mode
+    that text is then written into the wrong PDF as an invisible text layer.
+    Salt the name with a short hash of the file's resolved path so each source
+    owns its cache. Callers must use this helper everywhere they read or write
+    an OCR cache file.
+    """
+    p = Path(fpath)
+    try:
+        key = str(p.resolve())
+    except OSError:
+        key = str(p)
+    digest = hashlib.sha1(key.replace("\\", "/").encode("utf-8")).hexdigest()[:8]
+    return f"{p.stem}-{digest}.txt"
 
 
 def cuda_available() -> bool:

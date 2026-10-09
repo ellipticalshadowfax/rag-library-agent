@@ -362,7 +362,9 @@ def verify_questions(verified: dict, parent_texts: dict, cfg, client) -> dict:
 
     Given ONLY the parent text + question + choices + marked answer, return a
     structured verdict (supported? yes/no + note). Returns {qid: bool} after
-    dropping unsupported. Batched per parent to amortize context.
+    dropping unsupported. Batched per parent to amortize context. A parent whose
+    verification call errors marks only that parent's questions False (they are
+    dropped) and processing continues with the remaining parents.
     """
     if not verified:
         return {}
@@ -426,7 +428,12 @@ def verify_questions(verified: dict, parent_texts: dict, cfg, client) -> dict:
             verdicts = {int(v.get("index")): bool(v.get("supported"))
                         for v in data.get("answers", [])}
         except Exception:
-            return {qid: False for qid, _ in items}
+            # Verification failed for THIS parent only. Record its questions as
+            # unsupported and keep going so accepted verdicts from earlier
+            # parents (and later parents) are not thrown away.
+            for qid, _q in items:
+                accepted[qid] = False
+            continue
         for i, (qid, _q) in enumerate(items):
             if verdicts.get(i, False):
                 accepted[qid] = True
@@ -534,6 +541,16 @@ def build_quiz(spec, set_name, cfg, client, stream_cb=None, progress_cb=None,
     accepted = list(quiz.get("questions") or [])
     qid_counter = len(accepted)
 
+    # When resuming a partially-built quiz, seed each unit's accepted count from
+    # the questions already stored (tagged with their unit id). Without this,
+    # every unit restarts at 0 and regenerates its full allocation, growing the
+    # quiz with duplicates on a second build of the same spec.
+    resumed_by_unit = {}
+    for _q in accepted:
+        _u = _q.get("unit")
+        if _u:
+            resumed_by_unit[_u] = resumed_by_unit.get(_u, 0) + 1
+
     def progress(msg):
         if progress_cb:
             try:
@@ -553,8 +570,8 @@ def build_quiz(spec, set_name, cfg, client, stream_cb=None, progress_cb=None,
         parent_texts = _parent_texts_for(unit_parent_ids, set_name) if unit_parent_ids else {}
 
         report["per_unit"][uid] = {
-            "requested": alloc, "accepted": 0, "batches": 0,
-            "drops": {},
+            "requested": alloc, "accepted": resumed_by_unit.get(uid, 0),
+            "batches": 0, "drops": {},
         }
         progress(f"Generating {alloc} questions for \"{unit.get('title') or uid}\" …")
 
@@ -573,13 +590,13 @@ def build_quiz(spec, set_name, cfg, client, stream_cb=None, progress_cb=None,
             parents_ordered = _sample_children(unit, set_name, cfg, collection,
                                                embedder, word_cap)
 
-        unit_accepted = 0
+        unit_accepted = resumed_by_unit.get(uid, 0)
         unit_batches = 0
         # Batch the parents in order; if the pool is empty there is nothing to
         # generate from, so this unit is skipped with a warning.
         pool = parents_ordered or []
         if not pool:
-            report["per_unit"][uid]["accepted"] = 0
+            report["per_unit"][uid]["accepted"] = unit_accepted
             report["warnings"].append(
                 f"Unit {uid}: no parent text available; skipped.")
             continue
@@ -650,7 +667,7 @@ def build_quiz(spec, set_name, cfg, client, stream_cb=None, progress_cb=None,
                                                 cfg, client)
                 kept, dropped = [], 0
                 for i, q in enumerate(staged):
-                    if str(i) in accepted_idx:
+                    if accepted_idx.get(str(i)):
                         kept.append(q)
                     else:
                         dropped += 1

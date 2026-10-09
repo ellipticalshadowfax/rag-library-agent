@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """merge_ocr_into_pdf.py - Add an invisible (searchable) text layer to scanned
-PDFs using the OCR text already cached in ocr/<stem>.txt. Writes in place.
+PDFs using the OCR text already cached in ocr/<stem>-<hash>.txt. Writes in
+place.
 
 Safety: only touched when the OCR cache exists and page count matches.
 """
@@ -72,8 +73,9 @@ def main():
         if not cache.exists():
             print(f"skip (no cache): {cache}")
             continue
-        # find the source PDF by stem
-        stem = cache.stem
+        # find the source PDF by stem (cache names are salted as
+        # <stem>-<8hex>.txt, so strip the hash suffix before matching)
+        stem = re.sub(r"-[0-9a-f]{8}$", "", cache.stem)
         hits = []
         for root in ["/media/library"]:
             for f in Path(root).rglob("*.pdf"):

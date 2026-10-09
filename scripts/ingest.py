@@ -23,7 +23,7 @@ console = Console()
 
 from agent import tokenize
 
-from _paths import merge_local_config, rag_root, resolve_device
+from _paths import merge_local_config, ocr_cache_name, rag_root, resolve_device
 
 EXTENSIONS_TEXT = {".pdf", ".epub", ".mobi", ".djvu", ".txt", ".html", ".htm"}
 
@@ -389,6 +389,26 @@ class Manifest:
     def close(self):
         self.conn.close()
 
+    def commit(self):
+        self.conn.commit()
+
+
+def _chunk_ids_for_source(collection, rel: str) -> list:
+    """Return the Chroma chunk ids currently stored for a source rel path.
+
+    Used to delete the matching BM25 postings (keyed by chunk id, not by the
+    source rel path) when a file is pruned or re-indexed.
+    """
+    try:
+        got = collection.get(where={"source": rel}, include=[]) or {}
+        return list(got.get("ids") or [])
+    except Exception:
+        try:
+            got = collection.get(where={"source": rel}) or {}
+            return list(got.get("ids") or [])
+        except Exception:
+            return []
+
 # ─── Calibre Metadata ────────────────────────────────────────────────────────
 
 def calibre_db_path(target: Path) -> Path | None:
@@ -741,7 +761,7 @@ def extract_text(fpath: Path, ext: str, ocr_cache: Path) -> tuple[str, dict]:
 
     if ext == ".pdf":
         # Check for OCR cache first
-        ocr_cached = ocr_cache / (fpath.stem + ".txt")
+        ocr_cached = ocr_cache / ocr_cache_name(fpath)
         if ocr_cached.exists():
             text = ocr_cached.read_text(encoding="utf-8", errors="replace")
             return text, meta
@@ -1170,13 +1190,24 @@ def ingest(target: str, set_name: str, cfg: dict, force: bool = False, only_path
             if rel not in seen and not Path(abs_path).exists():
                 stale.append(rel)
         for rel in stale:
+            # Collect this file's chunk ids before deleting the chunks so its
+            # BM25 postings (keyed by chunk id, not by rel) are removed too;
+            # otherwise deleted books keep matching the lexical leg.
+            chunk_ids = _chunk_ids_for_source(collection, rel)
             try:
                 collection.delete(where={"source": rel})
             except Exception as e:
                 print(f"WARN prune-stale failed for {rel}: {e}", flush=True)
+            for cid in chunk_ids:
+                manifest.remove_bm25_tokens(cid, set_name)
             manifest.remove(rel, set_name)
             manifest.remove_parents(rel, set_name)
         if stale:
+            # Rebuild document frequencies so tokens that only appeared in the
+            # pruned files no longer count, then persist (rebuild_bm25_df and
+            # remove_parents don't commit on their own).
+            manifest.rebuild_bm25_df(set_name)
+            manifest.commit()
             console.print(
                 f"[dim]Pruned {len(stale)} removed/moved file(s) from "
                 f"'{set_name}' and its collection.[/dim]")
@@ -1209,7 +1240,7 @@ def ingest(target: str, set_name: str, cfg: dict, force: bool = False, only_path
         try:
             # OCR if needed
             if finfo["ocr_status"] == "needed":
-                ocr_out = ocr_cache / (fpath.stem + ".txt")
+                ocr_out = ocr_cache / ocr_cache_name(fpath)
                 if not ocr_out.exists():
                     print(f"[{idx}/{total}] OCR: {fpath.name}", flush=True)
                     ocr_pdf_auto(str(fpath), str(ocr_out), cfg.get("ocr_languages", ["en"]),
@@ -1296,18 +1327,21 @@ def ingest(target: str, set_name: str, cfg: dict, force: bool = False, only_path
 
             # Drop any chunks previously stored for this file (deterministic ids
             # re-upsert in place, but a changed chunking/strategy can change the
-            # chunk count, so stale tail chunks must be removed first).
+            # chunk count, so stale tail chunks must be removed first). Capture
+            # the old chunk ids first so their BM25 postings go too.
+            old_chunk_ids = _chunk_ids_for_source(collection, rel)
             try:
                 collection.delete(where={"source": rel})
             except Exception as e:
                 print(f"[{idx}/{total}] WARN delete-stale failed for {fpath.name}: {e}",
                       flush=True)
+            for cid in old_chunk_ids:
+                manifest.remove_bm25_tokens(cid, set_name)
 
             # Embed + upsert in batches. Chroma has a hard per-call limit (~5461), so
             # any file - including huge omnibuses - is processed across multiple calls
             # instead of a single one. Chunk IDs stay deterministic (rel:index).
             # Also write BM25 token data for persistent lexical index.
-            manifest.remove_bm25_tokens(rel, set_name)
             if chunked is not None:
                 manifest.remove_parents(rel, set_name)
             for start in range(0, len(chunks), batch_size):

@@ -175,7 +175,7 @@ def _resolve_topic(request, set_name, cfg, embedder, collection) -> dict:
         qemb = embedder.encode([_embed_query(topic)], prompt_name="query")[0]
         texts = [_embed_passage(w + " " + s["title"] + " " + (s["text"] or ""))
                  for w, s in sections]
-        embs = embedder.encode(texts, prompt_name="document")
+        embs = embedder.encode(texts, prompt_name="passage")
         scored = []
         for (w, s), e in zip(sections, embs):
             sim = _cosine(qemb, e)
@@ -229,14 +229,16 @@ def _resolve_topic(request, set_name, cfg, embedder, collection) -> dict:
             "syllabus_summary": summary, "warnings": warnings}
 
 
-# ─── Embedding helpers (E5 prefixes) ─────────────────────────────────────────
+# ─── Embedding helpers (E5 prompts applied via prompt_name) ──────────────────
 
 def _embed_query(topic: str) -> str:
-    return f"query: {topic}"
+    # The "query: " prefix is applied by the embedder's registered prompt
+    # (prompt_name="query"); don't prepend it here or it gets doubled.
+    return topic
 
 
 def _embed_passage(text: str) -> str:
-    return f"passage: {text[:1500]}"
+    return text[:1500]
 
 
 def _cosine(a, b) -> float:

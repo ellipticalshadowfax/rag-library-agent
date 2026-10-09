@@ -36,7 +36,7 @@ os.environ.setdefault("HF_HUB_OFFLINE", "1")  # Skip HuggingFace remote checks; 
 
 from mcp.server.fastmcp import FastMCP
 
-from _paths import rag_root, resolve_device
+from _paths import rag_root, resolve_device, SECRET_KEYS
 
 RAG_ROOT = rag_root()
 DEFAULT_SET = "library"
@@ -622,7 +622,14 @@ def get_config(keys: list = None) -> str:
     agent = _load_agent()
     cfg = agent.load_config()
     if keys:
-        return "\n".join(f"{k}: {cfg.get(k)}" for k in keys if k in cfg)
+        # Never echo secrets (e.g. llm_api_key) — the merged config carries
+        # the real value even though the default notable list omits it.
+        allowed = [k for k in keys if k not in SECRET_KEYS]
+        blocked = [k for k in keys if k in SECRET_KEYS]
+        lines = [f"{k}: {cfg.get(k)}" for k in allowed if k in cfg]
+        if blocked:
+            lines.append(f"(refused secret key(s): {', '.join(blocked)})")
+        return "\n".join(lines)
     notable = ["llm_base_url", "llm_model", "embed_model", "chat_mode",
                "agentic_enabled", "rerank_enabled", "lexical_backend",
                "chunking_strategy", "fsrs_enabled", "quiz_default_count",

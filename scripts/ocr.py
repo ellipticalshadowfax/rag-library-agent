@@ -20,7 +20,7 @@ os.environ["CUDA_VISIBLE_DEVICES"] = ""  # Force CPU
 
 import ingest as ING  # needs_ocr, ocr_pdf_rapidocr, merge_text_into_pdf
 
-from _paths import rag_root
+from _paths import rag_root, ocr_cache_name
 
 RAG_ROOT = rag_root()
 OCR_CACHE = RAG_ROOT / "ocr"
@@ -109,7 +109,7 @@ def run(target: str, mode: str, cfg: dict, force: bool = False,
                 ok = ING.ocr_pdf_auto(str(p), str(side), langs, backend)
                 print(f"[{idx}/{total}] {'sidecar' if ok else 'failed'}: {p.name}", flush=True)
             else:  # merge back into the original PDF
-                cache = OCR_CACHE / (p.stem + ".txt")
+                cache = OCR_CACHE / ocr_cache_name(p)
                 ok = ING.ocr_pdf_auto(str(p), str(cache), langs, backend)
                 if ok:
                     merged = ING.merge_text_into_pdf(str(p), str(cache))

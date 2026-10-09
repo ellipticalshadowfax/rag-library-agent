@@ -23,6 +23,7 @@ import io
 import json
 
 import study
+import quiz_grade
 
 
 # ─── Format registry ─────────────────────────────────────────────────────────
@@ -61,15 +62,20 @@ def render_gift(quiz):
         if qtype in ("mcq",):
             parts = _choice_parts(qu.get("choices"))
             # GIFT marks the correct line with '=' and distractors with '~'.
-            # Our answer key is the correct letter (e.g. "A").
-            key_letter = "".join(ch for ch in answer if ch.isalpha()).upper()
+            # Reuse the grader's extractor so a full-text answer such as
+            # "A) Anna Sewell" yields the letter "A" (not "AANNASEWELL"),
+            # which would otherwise match no choice and make the quiz
+            # ungradable on import.
+            key_letter = quiz_grade._answer_letter(answer)
             items = []
             for letter, text in parts:
                 marker = "=" if (letter and key_letter and letter == key_letter) else "~"
                 items.append("%s%s" % (marker, _gift_escape(text)))
             lines.append("%s {\n  %s\n}" % (qtext, "\n  ".join(items)))
         elif qtype == "true_false":
-            tf = "TRUE" if str(answer).strip().lower() in ("true", "t") else "FALSE"
+            # Use the same coercion grading accepts (true/false/yes/no/1/0) so
+            # GIFT doesn't invert answers like "yes" or "1".
+            tf = "TRUE" if quiz_grade._as_bool(answer) is True else "FALSE"
             lines.append("%s{%s}" % (qtext, tf))
         elif qtype == "fill_blank":
             lines.append("%s{=%s}" % (_gift_escape((qu.get("q") or "")), _gift_escape(answer)))

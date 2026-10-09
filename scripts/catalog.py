@@ -129,15 +129,33 @@ def extract_filter_kind(query: str):
 
 
 def extract_count(query: str, default: int) -> int:
-    """Extract a question count from a quiz request ("quiz me with 15 ...")."""
-    m = re.search(r"\b(\d{1,3})\b", query or "")
-    if m:
-        try:
-            n = int(m.group(1))
-            if 1 <= n <= 100:
-                return n
-        except ValueError:
-            pass
+    """Extract a question count from a quiz request ("quiz me with 15 ...").
+
+    Anchored on count phrasing (a number adjacent to a count/quiz cue) so
+    numbers that are part of the topic are not mistaken for a count:
+    "quiz me on 18th-century seafaring" and "the 7 habits ..." keep the default.
+    """
+    q = query or ""
+    # A standalone 1-3 digit token: not part of a longer number and not followed
+    # by a letter (so "18th", "1966" don't yield 18/66).
+    num = r"(?<!\d)(\d{1,3})(?![\dA-Za-z])"
+    patterns = (
+        re.compile(num + r"\s*(?:questions?|qs?|items?|cards?|mcqs?|problems?)\b",
+                   re.IGNORECASE),
+        re.compile(r"\b(?:quiz|test|ask|generate|build|make|create|give|want)"
+                   r"\s+(?:(?:me|it)\s+)?(?:on|about|with|for|of|up\s+to|"
+                   r"around|to)?\s*" + num, re.IGNORECASE),
+        re.compile(r"\b(?:of|with|for)\s+" + num, re.IGNORECASE),
+    )
+    for pat in patterns:
+        m = pat.search(q)
+        if m:
+            try:
+                n = int(m.group(1))
+                if 1 <= n <= 100:
+                    return n
+            except ValueError:
+                pass
     return default
 
 

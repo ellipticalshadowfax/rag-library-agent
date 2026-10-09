@@ -926,8 +926,14 @@ def api_config_set():
     # CONFIG_META registry so new keys can never drift out of sync.
     allowed = _config_writable_keys()
     for k in allowed:
-        if k in data:
-            cfg[k] = data[k]
+        if k not in data:
+            continue
+        if k in SECRET_KEYS and str(data[k]).strip() == API_KEY_MASK:
+            # GET /api/config returns a masked key. A read-modify-write client
+            # that POSTs that value back must not overwrite the real secret
+            # with the literal mask; skip it (writes go via /api/llm/apply).
+            continue
+        cfg[k] = data[k]
     if "sets" in data:
         cfg["sets"] = data["sets"]
     save_cfg(cfg)
@@ -1120,7 +1126,7 @@ def api_embed_apply():
     # Chat embedder is cached; drop it so the new model takes effect.
     global _chat_embedder
     _chat_embedder = None
-    return jsonify({"ok": True, "config": cfg, "reindex": True})
+    return jsonify({"ok": True, "config": _public_cfg(cfg), "reindex": True})
 
 
 # ─── LLM API configuration + dormant self-host plumbing ─────────────────────
@@ -1217,6 +1223,24 @@ SELFHOST_DL_STATE = {
     "est_mb": SELFHOST_EST_MB, "downloaded_mb": 0, "error": None,
 }
 SELFHOST_PROC = {"pid": None}
+# Live Popen for the self-hosted llama-server. Kept OUT of SELFHOST_PROC so the
+# Popen object can't be sent to the client; poll() is what reaps a finished
+# child (a zombie would otherwise keep "already running" true forever because
+# os.kill(zombie, 0) succeeds). Same pattern as _OCR_PROC/_INGEST_PROC.
+_LLM_PROC = None
+
+
+def _llm_proc_alive() -> bool:
+    """Reap a finished llama-server and report whether one is truly running."""
+    global _LLM_PROC
+    if _LLM_PROC is None:
+        SELFHOST_PROC["pid"] = None
+        return False
+    if _LLM_PROC.poll() is not None:  # exited; poll() reaps the zombie
+        _LLM_PROC = None
+        SELFHOST_PROC["pid"] = None
+        return False
+    return True
 
 
 @app.route("/api/llm/download", methods=["POST"])
@@ -1276,16 +1300,14 @@ def api_llm_start():
         return jsonify({"ok": False,
                         "error": "No GGUF model in models/ yet."}), 400
     gguf = gguflist[0]
-    if SELFHOST_PROC["pid"]:
-        try:
-            os.kill(SELFHOST_PROC["pid"], 0)
-            return jsonify({"ok": False, "error": "llama-server already running."}), 409
-        except OSError:
-            SELFHOST_PROC["pid"] = None
+    if _llm_proc_alive():
+        return jsonify({"ok": False, "error": "llama-server already running."}), 409
     log_path = RAG_ROOT / "llama-server.log"
     with open(log_path, "w") as logf:
         proc = subprocess.Popen([binary, "-m", str(gguf), "-c", "8192"],
                                 stdout=logf, stderr=subprocess.STDOUT)
+    global _LLM_PROC
+    _LLM_PROC = proc
     SELFHOST_PROC["pid"] = proc.pid
     return jsonify({"ok": True, "pid": proc.pid, "model": str(gguf)})
 
@@ -1294,16 +1316,23 @@ def api_llm_start():
 def api_llm_control():
     data = request.get_json(force=True) or {}
     action = data.get("action")
-    pid = SELFHOST_PROC["pid"]
-    if not pid:
+    if not _llm_proc_alive():
         return jsonify({"ok": False, "error": "llama-server is not running."}), 404
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        SELFHOST_PROC["pid"] = None
-        return jsonify({"ok": False, "error": "Process already exited."}), 404
+    global _LLM_PROC
+    proc = _LLM_PROC
+    if proc is None:  # liveness check above guaranteed otherwise
+        return jsonify({"ok": False, "error": "llama-server is not running."}), 404
+    pid = SELFHOST_PROC["pid"]
     if action == "stop":
-        os.kill(pid, signal.SIGTERM)
+        try:
+            proc.terminate()
+            proc.wait(timeout=10)
+        except Exception:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                pass
+        _LLM_PROC = None
         SELFHOST_PROC["pid"] = None
         return jsonify({"ok": True, "message": "llama-server stopped."})
     return jsonify({"ok": False, "error": "Unknown action."}), 400
@@ -2172,7 +2201,17 @@ def _course_quizzed_counts(set_name, work):
     import re as _re
     counts = {}
     norm = lambda s: _re.sub(r"[^a-z0-9]+", "", (s or "").strip().lower())
-    for q in quiz_store.list_quizzes(set_name):
+    for summary in quiz_store.list_quizzes(set_name):
+        # list_quizzes() returns summary dicts only (no "questions" key), so we
+        # must load each full quiz to read its questions.
+        if not summary.get("question_count"):
+            continue
+        qid = summary.get("id")
+        if not qid:
+            continue
+        q = quiz_store.get_quiz(qid)
+        if not q:
+            continue
         for qu in (q.get("questions") or []):
             prov = qu.get("provenance") or {}
             if prov.get("title") and norm(work) and \
@@ -2407,6 +2446,25 @@ def _quiz_spec_proposal(set_name, topic, count, cfg, conv_id, filter_kind=None):
     }
 
 
+# A short, whole-message confirmation of a pending quiz spec (not merely a
+# message that happens to contain a verb like "build" or the word "yes").
+_PENDING_CONFIRM_RE = re.compile(
+    r"^(?:please\s+)?(?:yes|yep|yeah|yup|ok|okay|sure|confirm|"
+    r"go(?:\s+ahead)?|do\s+it|make\s+it\s+now|build(?:\s+it)?|"
+    r"generate(?:\s+it)?|create(?:\s+it)?|start)(?:\s+please)?$")
+
+# Leading words that mark an informational question, which must be answered
+# rather than hijacked into a spec confirm/revise.
+_QUESTION_LEAD_RE = re.compile(
+    r"^(?:what|why|how|who|when|where|which|whose|whom|does|do|did|is|are|"
+    r"was|were|can|could|should|would|will|explain|tell|list|summari[sz]e|"
+    r"describe|define|give|show|find)\b")
+
+
+def _looks_like_question(q: str) -> bool:
+    return q.rstrip().endswith("?") or bool(_QUESTION_LEAD_RE.match(q))
+
+
 def _resolve_pending_spec_delta(conv_id, query):
     """If this conversation has a pending_quiz_spec proposal and the query
     reads as an adjustment to it, apply quiz_plan.revise_spec and return a
@@ -2419,18 +2477,28 @@ def _resolve_pending_spec_delta(conv_id, query):
     q = (query or "").strip().lower()
     if not q:
         return None
-    # A plain "build it / generate / go" confirms the pending spec.
-    if re.search(r"\b(build|generate|go ahead|make it now|yes|yep|confirm)\b", q):
+    # Real questions are answered normally — never treated as a confirm/revise
+    # ("What generates ATP?", "Is the quiz ready?").
+    if _looks_like_question(q):
+        return None
+    # A plain "build it / generate / go / yes" confirms the pending spec, but
+    # only as a whole-message imperative (not a question that mentions a verb).
+    if _PENDING_CONFIRM_RE.match(q):
         return {"confirm": True, "spec": pending,
                 "answer": ("Proceeding to build the pending quiz. "
                            "Open the Study tab's Generated quizzes to run it."),
                 "sources": [], "quiz_mode": True, "quiz_count": 0,
                 "quiz_spec_confirmed": True, "fiction_only": False,
                 "low_relevance": False, "relevance_reason": ""}
+    # Adjustments must be short imperatives; a long message (or a stray number
+    # in the topic) must not trigger revision parsing.
+    if len(q.split()) > 12:
+        return None
     # Detect explicit adjustment keywords; without them fall through.
     if not re.search(r"\b(unit|units|drop|exclude|remove|add|include|double|"
                      r"half|more|fewer|questions?|harder|easier|deep|surface|"
-                     r"balanced|difficulty|count|make it|\d+)\b", q):
+                     r"balanced|difficulty|count|make it)\b", q) and \
+       not re.search(r"\b\d+\s*(?:questions?|q)\b", q):
         return None
     deltas = {}
     # count: "make it N questions" / "N questions"
@@ -2685,6 +2753,12 @@ def run_rag_chat(set_name, query, top_k=None, filter_kind=None, history=None):
                     "fiction_only": result.get("fiction_only", False),
                     "low_relevance": result.get("low_relevance", False),
                     "relevance_reason": result.get("relevance_reason", "")}, 200
+        except SystemExit:
+            # setup_chroma signals a missing collection via sys.exit; fall
+            # through to _prepare_rag's clean {"error": ...} response below
+            # instead of letting SystemExit escape and drop the connection.
+            print("[chat] collection unavailable; falling back to single-shot",
+                  flush=True)
         except Exception as e:
             print(f"[chat] agentic loop failed ({e}); falling back to single-shot", flush=True)
 
@@ -2952,10 +3026,22 @@ def _stream_sse(set_name, query, top_k, filter_kind, history, conv_id):
                     stream_cb=lambda t: evq.put(("delta", t)),
                 )
                 evq.put(("done", result))
+            except SystemExit:
+                # setup_chroma() signals a missing collection via sys.exit;
+                # SystemExit is NOT an Exception, so without this the worker
+                # would die silently and the queue drain below would hang the
+                # SSE connection forever.
+                evq.put(("error", f"Collection '{set_name}' not found. "
+                                  "Run ingestion first."))
             except Exception as e:
                 print(f"[chat] streamed agentic loop failed ({e}); "
                       "using single-shot", flush=True)
                 evq.put(("error", str(e)))
+            finally:
+                # Always signal end-of-stream so the generator can never block
+                # forever on evq.get() even if an unexpected BaseException
+                # (e.g. KeyboardInterrupt) escapes the handlers above.
+                evq.put(("done", None))
 
         t = threading.Thread(target=_agent_worker, daemon=True)
         t.start()
@@ -2998,14 +3084,11 @@ def _stream_sse(set_name, query, top_k, filter_kind, history, conv_id):
 
     payload = _prepare_rag(set_name, query, top_k, filter_kind, history)
     if "error" in payload:
-        text = payload["answer"]
-        yield "event: delta\ndata: " + _json.dumps(text) + "\n\n"
-        done = {"answer": text, "sources": payload.get("sources", []),
-                "fiction_only": payload.get("fiction_only", False),
-                "low_relevance": payload.get("low_relevance", False),
-                "relevance_reason": payload.get("relevance_reason", "")}
-        yield "event: done\ndata: " + _json.dumps(done) + "\n\n"
-        _persist_chat(conv_id, query, done)
+        # _prepare_rag()'s error dict is {"error": msg} only — it has no
+        # "answer" key, so reading payload["answer"] here raised KeyError and
+        # turned the intended SSE error event into an HTTP 500.
+        yield "event: error\ndata: " + _json.dumps(
+            {"error": payload["error"]}) + "\n\n"
         return
 
     client = get_chat_client()
