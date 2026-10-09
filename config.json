@@ -38,9 +38,7 @@
   "rerank_model": "cross-encoder/ms-marco-MiniLM-L-6-v2",
   "rerank_enabled": true,
   "ingest_batch_size": 500,
-  "exclude": [
-    "Leo Tolstoy"
-  ],
+  "exclude": [],
   "fiction_tags": [
     "Fiction",
     "Short Stories",

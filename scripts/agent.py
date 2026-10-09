@@ -5,7 +5,7 @@ import hashlib
 import json
 import os
 import re
-import sys
+import threading
 
 # Force local-only model loading: skip HuggingFace remote checks on every
 # invocation. Models must be pre-cached (run.sh / manual first-load handles
@@ -96,13 +96,28 @@ def setup_client(cfg: dict) -> OpenAI:
     )
 
 
+class CollectionNotFound(Exception):
+    """Requested Chroma collection does not exist.
+
+    A normal ``Exception`` (not ``SystemExit``) so every caller's
+    ``except Exception`` handles it uniformly. ``sys.exit`` is a
+    ``BaseException`` that escapes ``except Exception``; that previously killed
+    SSE worker threads silently (hanging the stream) and dropped chat
+    connections.
+    """
+
+    def __init__(self, set_name: str = ""):
+        super().__init__(f"Collection '{set_name}' not found. Run ingest first.")
+        self.set_name = set_name
+
+
 def setup_chroma(set_name: str):
     client = chromadb.PersistentClient(path=str(rag_root() / "index"))
     try:
         return client.get_collection(set_name)
     except Exception:
         console.print(f"[red]Collection '{set_name}' not found. Run ingest.py first.[/red]")
-        sys.exit(1)
+        raise CollectionNotFound(set_name)
 
 
 
@@ -253,15 +268,21 @@ def _match_titles(query: str, set_name: str, limit: int = 4) -> list[str]:
     db = rag_root() / "manifest.db"
     if not db.exists():
         return []
-    try:
-        con = sqlite3.connect(db)
-        rows = con.execute(
-            "SELECT DISTINCT title FROM files WHERE set_name=? AND title IS NOT NULL AND title<>''",
-            (set_name,)).fetchall()
-        con.close()
-    except Exception as e:
-        print(f"[chat] manifest title lookup failed: {e}")
-        return []
+    # Cache the title list per set; the query+normalize scan below was repeated
+    # on every chat request (P5). Invalidated by invalidate_set_caches() after
+    # an ingest changes the manifest.
+    rows = _titles_cache.get(set_name)
+    if rows is None:
+        try:
+            con = sqlite3.connect(db)
+            rows = con.execute(
+                "SELECT DISTINCT title FROM files WHERE set_name=? AND title IS NOT NULL AND title<>''",
+                (set_name,)).fetchall()
+            con.close()
+        except Exception as e:
+            print(f"[chat] manifest title lookup failed: {e}")
+            return []
+        _titles_cache[set_name] = rows
 
     q = re.sub(r"[^a-z0-9 ]", " ", query.lower()).strip()
     qwords = {w for w in q.split() if w not in _QUERY_STOP}
@@ -526,14 +547,24 @@ def _llm_subqueries(query: str, context: str, client, cfg: dict) -> list[str]:
     return out
 
 
-def rerank_hits(hits: list, query: str, reranker, top_n: int = 24) -> tuple[list, bool]:
+def rerank_hits(hits: list, query: str, reranker, top_n: int = 24,
+                max_candidates: int = 0) -> tuple[list, bool]:
     """Re-score candidates with a cross-encoder reranker.
 
     Mutates ``hit["rerank_score"]`` on each dict. Returns (reranked_hits, ok)
     where handlers that fail (or a missing reranker) leave order unchanged.
+
+    ``max_candidates`` bounds how many fused candidates are cross-encoded (a
+    cross-encoder is O(1) calls but each is expensive). Candidates arrive
+    best-first from RRF, so only the leading ones are worth rescoring; the
+    default (2x ``top_n``) preserves current behavior for the normal pool while
+    capping a future over-large fused pool.
     """
     if reranker is None or not hits:
         return hits, False
+    cap = max_candidates or (top_n * 2)
+    if cap and len(hits) > cap:
+        hits = hits[:cap]
     pairs = [(query, (h.get("document") or "")[:1200]) for h in hits]
     try:
         scores = [float(s) for s in reranker.predict(pairs, show_progress_bar=False)]
@@ -635,6 +666,26 @@ BM25_BATCH = 20000
 FUSE_RRF_K = 60
 
 _bm25_cache = {}  # set_name -> {"bm25": BM25Okapi, "ids": [chunk ids], "df": {token: doc_freq}}
+# Serializes BM25 index construction so concurrent first requests don't each
+# run the multi-second Chroma tokenization (P1). Also guards _titles_cache.
+_CACHE_LOCK = threading.Lock()
+_titles_cache = {}  # set_name -> list[title] (invalidated after an ingest)
+
+
+def invalidate_set_caches(set_name: str | None = None) -> None:
+    """Drop cached BM25 indexes / title lists so the next query rebuilds them.
+
+    Called by the server when an ingest or OCR job finishes: those run in a
+    child process that mutates the collection + manifest.db directly, so the
+    parent's in-memory caches are stale afterwards.
+    """
+    with _CACHE_LOCK:
+        if set_name:
+            _bm25_cache.pop(set_name, None)
+            _titles_cache.pop(set_name, None)
+        else:
+            _bm25_cache.clear()
+            _titles_cache.clear()
 
 
 # Minimum fraction of the collection's chunks a persisted BM25 index must
@@ -663,11 +714,30 @@ def _bm25_is_covered(hydrated_docs: int, collection, cfg: dict | None = None) ->
 
 
 def _get_bm25_index(set_name, collection, backend="auto", cfg: dict | None = None):
+    """Return the per-set BM25 index, building it once even under concurrency.
+
+    Two threads hitting an empty cache at the same moment would each run the
+    multi-second Chroma tokenization/rebuild (P1); the lock serializes them and
+    the double-check serves the winner's index to everyone else.
+    """
     cf = cfg or {}
     cached = _bm25_cache.get(set_name)
     if cached is not None:
         return cached
+    with _CACHE_LOCK:
+        cached = _bm25_cache.get(set_name)
+        if cached is not None:
+            return cached
+        return _build_bm25_index(set_name, collection, backend, cf)
 
+
+def _build_bm25_index(set_name, collection, backend, cf):
+    """Build the BM25 index from the persisted tables or by scanning Chroma.
+
+    The caller must hold ``_CACHE_LOCK``. A Chroma-built index is persisted back
+    to manifest.db (``replace_bm25``) so later process starts hydrate instead of
+    re-tokenizing the whole corpus (P5).
+    """
     batch = int(cf.get("bm25_batch", BM25_BATCH) or BM25_BATCH)
 
     # Try hydrating from the persistent BM25 tables in manifest.db.
@@ -765,12 +835,36 @@ def _get_bm25_index(set_name, collection, backend="auto", cfg: dict | None = Non
         bm25 = BM25Okapi(tokdocs)
         print(f"[chat] BM25 index ready ({len(ids)} docs).", flush=True)
         _bm25_cache[set_name] = {"bm25": bm25, "ids": ids, "df": df}
+        # Persist so the next process start hydrates instead of rebuilding.
+        _persist_bm25(ids, tokdocs, set_name)
         return _bm25_cache[set_name]
 
     # Neither path produced data.
     print(f"[chat] BM25 index empty for '{set_name}'.", flush=True)
     _bm25_cache[set_name] = {"bm25": None, "ids": [], "df": {}}
     return _bm25_cache[set_name]
+
+
+def _persist_bm25(ids, tokdocs, set_name) -> None:
+    """Write a fresh Chroma-built posting list back to manifest.db.
+
+    Without this, a sparse/absent persisted index is rebuilt from scratch on
+    every process start (minutes on a large library). Best-effort: a failure
+    (e.g. the ingest subprocess holds a write lock) only costs a future rebuild.
+    """
+    if not ids:
+        return
+    try:
+        import ingest as _ing  # local import avoids the ingest<->agent cycle
+        man = _ing.Manifest(rag_root() / "manifest.db")
+        try:
+            man.replace_bm25(list(zip(ids, tokdocs)), set_name)
+        finally:
+            man.close()
+        print(f"[chat] persisted BM25 index for '{set_name}' ({len(ids)} docs).",
+              flush=True)
+    except Exception as e:
+        print(f"[chat] BM25 persist failed (non-fatal): {e}", flush=True)
 
 
 def _bm25_leg(set_name, query, skip_ids, collection, n=None, backend="auto", cfg: dict | None = None):
@@ -1122,8 +1216,7 @@ def cmd_sources(hits: list):
 
 def cmd_collections():
     """List all collections."""
-    rag_root = Path(__file__).resolve().parent.parent
-    client = chromadb.PersistentClient(path=str(rag_root / "index"))
+    client = chromadb.PersistentClient(path=str(rag_root() / "index"))
     for col in client.list_collections():
         console.print(f"  {col.name}: {col.count()} chunks")
 
@@ -1147,7 +1240,12 @@ def main():
     console.print()
 
     client = setup_client(cfg)
-    collection = setup_chroma(args.set)
+    try:
+        collection = setup_chroma(args.set)
+    except CollectionNotFound:
+        # CLI: keep the clean exit behavior setup_chroma used to provide via
+        # sys.exit, now that it raises a catchable exception.
+        raise SystemExit(1)
     embedder = setup_embedder(cfg)
 
     console.print(f"[dim]Indexed: {collection.count()} chunks in '{args.set}'[/dim]")
@@ -1155,6 +1253,7 @@ def main():
     console.print()
 
     filter_mode = None  # None = no filter
+    hits = []           # last retrieval results (for /sources before any query)
 
     while True:
         try:

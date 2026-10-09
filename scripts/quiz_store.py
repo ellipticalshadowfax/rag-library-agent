@@ -28,7 +28,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from _paths import rag_root
+from _paths import rag_root, safe_id
 
 QUIZ_DIR = rag_root() / "quizzes"
 
@@ -36,11 +36,15 @@ QUIZ_DIR = rag_root() / "quizzes"
 # ─── Path helpers ────────────────────────────────────────────────────────────
 
 def _spec_path(qid: str) -> Path:
-    return QUIZ_DIR / "specs" / f"{qid}.json"
+    qid = safe_id(qid)
+    name = f"{qid}.json" if qid else "__invalid__.json"
+    return QUIZ_DIR / "specs" / name
 
 
 def _quiz_path(qid: str) -> Path:
-    return QUIZ_DIR / f"{qid}.json"
+    qid = safe_id(qid)
+    name = f"{qid}.json" if qid else "__invalid__.json"
+    return QUIZ_DIR / name
 
 
 def _syllabus_dir(set_name: str) -> Path:
@@ -158,7 +162,7 @@ def delete_spec(qid: str) -> bool:
 # ─── Cached syllabi (SESSION 2) ──────────────────────────────────────────────
 
 def _syllabus_path(set_name: str, slug: str, parents_hash: str) -> Path:
-    return _syllabus_dir(set_name) / f"{slug}.{parents_hash}.json"
+    return _syllabus_dir(set_name) / f"{_safe(slug)}.{_safe(parents_hash)}.json"
 
 
 def get_cached_syllabus(set_name: str, slug: str, parents_hash: str):

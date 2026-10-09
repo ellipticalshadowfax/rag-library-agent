@@ -88,7 +88,7 @@ def _get_collection(set_name):
         return _collections[set_name]
     try:
         _collections[set_name] = agent.setup_chroma(set_name)
-    except SystemExit:
+    except (SystemExit, agent.CollectionNotFound):
         raise ValueError(f"collection '{set_name}' not found (run ingest first)")
     return _collections[set_name]
 

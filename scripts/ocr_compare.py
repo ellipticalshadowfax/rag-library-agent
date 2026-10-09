@@ -42,8 +42,6 @@ RAG_ROOT = rag_root()
 SAMPLE_ROOT = Path(os.environ.get("OCR_SAMPLE_DIR", "/tmp/opencode/ocr_samples"))
 OCR_CACHE = RAG_ROOT / "ocr"
 REPORT_PATH = RAG_ROOT / "ocr_compare_report.json"
-DEFAULT_TESS_BIN = "/tmp/opencode/mamba/envs/tess/bin/tesseract"
-DEFAULT_TESSDATA = "/tmp/opencode/mamba/envs/tess/share/tessdata"
 
 # Words/confidences below these are junk regardless of structure.
 LANG_MAP = {"en": "eng", "es": "spa", "de": "deu", "fr": "fra", "it": "ita", "pt": "por", "ru": "rus"}
@@ -75,11 +73,11 @@ def _setup_tesseract(bin_path: str | None, tessdata: str | None):
         bin_path
         or os.environ.get("TESSERACT_BIN")
         or shutil.which("tesseract")
-        or DEFAULT_TESS_BIN
     )
-    if not os.path.exists(bin_path):
+    if not bin_path or not os.path.exists(bin_path):
         return False
     pytesseract.pytesseract.tesseract_cmd = bin_path
+    tessdata = tessdata or os.environ.get("TESSDATA_PREFIX")
     if tessdata and os.path.isdir(tessdata):
         os.environ["TESSDATA_PREFIX"] = tessdata
     return True

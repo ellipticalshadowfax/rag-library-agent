@@ -23,7 +23,10 @@ os.environ.setdefault("HF_HUB_OFFLINE", "1")  # Skip HuggingFace remote checks; 
 from flask import Flask, jsonify, request, send_from_directory, Response
 from flask_cors import CORS
 
-from _paths import SECRET_KEYS, cuda_available, rag_root, resolve_device
+from _paths import (SECRET_KEYS, atomic_write_json, cuda_available, rag_root,
+                    resolve_device)
+import agent
+from agent import CollectionNotFound
 
 RAG_ROOT = rag_root()
 SCRIPTS_DIR = RAG_ROOT / "scripts"
@@ -45,6 +48,33 @@ app = Flask(__name__, static_folder=str(RAG_ROOT / "web"), static_url_path="/web
 CORS(app)
 
 app.config["JSON_AS_ASCII"] = False
+# Cap request-body size so a huge/streamed POST can't exhaust memory.
+app.config["MAX_CONTENT_LENGTH"] = 64 * 1024 * 1024  # 64 MiB
+
+
+def _as_int(value, default: int, lo: int | None = None, hi: int | None = None) -> int:
+    """Coerce an untrusted request field to int without raising.
+
+    Non-numeric input falls back to ``default`` (so a bad ``top_k`` returns a
+    normal clamped request instead of HTTP 500), and the result is clamped.
+    """
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        n = int(default)
+    if lo is not None and n < lo:
+        n = lo
+    if hi is not None and n > hi:
+        n = hi
+    return n
+
+
+class _StreamCancelled(BaseException):
+    """Raised inside a worker's progress/stream callback when the SSE client
+    disconnected. Subclasses ``BaseException`` so it is not swallowed by the
+    ``except Exception`` guards around callbacks; the worker catches it to stop
+    burning LLM budget instead of running to completion into a dead queue.
+    """
 
 # ─── Shared ingest progress state ────────────────────────────────────────────
 INGEST_STATE = {
@@ -111,8 +141,8 @@ def save_cfg(cfg):
 
 
 def _write_json(path, data):
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
+    # Atomic: a crash mid-write must not truncate config.json/config.local.json.
+    atomic_write_json(path, data)
 
 
 def _save_local_overrides(updates: dict):
@@ -652,6 +682,9 @@ def start_ingest(target, set_name, force=False, only=None):
         proc = subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT, env=env)
     _INGEST_PROC = proc
     INGEST_STATE["pid"] = proc.pid
+    # The child mutates the collection + manifest.db; drop stale parent caches
+    # so the next chat rebuilds BM25/titles against the new index.
+    agent.invalidate_set_caches()
     return True, f"Ingest started (PID {proc.pid})."
 
 
@@ -688,9 +721,12 @@ def _stop_watchdog(pid, state, lock_path, grace=8.0):
 def _read_ocr_lock():
     lock = RAG_ROOT / ".ocr.lock"
     try:
-        return json.loads(lock.read_text())
+        data = json.loads(lock.read_text())
     except Exception:
         return None
+    # A partial/garbage lock (valid JSON but not an object, e.g. a bare number
+    # or list) must not crash callers that do ext.get("pid").
+    return data if isinstance(data, dict) else None
 
 
 def _pid_alive(pid):
@@ -708,8 +744,8 @@ def _clean_stale_lock(lock_path, ext=None):
     lock = lock_path or (RAG_ROOT / ".ocr.lock")
     try:
         if ext:
-            pid = int(ext.get("pid"))
-            if _pid_alive(pid):
+            pid = int(ext.get("pid", -1))
+            if pid > 0 and _pid_alive(pid):
                 return  # genuinely live — leave it alone
         lock.unlink()
     except Exception:
@@ -724,7 +760,8 @@ def ocr_active():
     ext = _read_ocr_lock()
     if not ext:
         return False
-    if not _pid_alive(int(ext.get("pid"))):
+    pid = int(ext.get("pid", -1))
+    if pid <= 0 or not _pid_alive(pid):
         _clean_stale_lock(RAG_ROOT / ".ocr.lock", ext)
         return False
     return True
@@ -854,8 +891,11 @@ _chat_lock = threading.Lock()
 def get_chat_client():
     global _chat_client
     if _chat_client is None:
-        cfg = load_cfg()
-        _chat_client = __import__("agent", fromlist=["setup_client"]).setup_client(cfg)
+        # Double-checked locking: under threaded=True two first requests would
+        # otherwise each build a client (P4).
+        with _chat_lock:
+            if _chat_client is None:
+                _chat_client = agent.setup_client(load_cfg())
     return _chat_client
 
 
@@ -867,8 +907,9 @@ def get_chat_collection(set_name):
 def get_chat_embedder():
     global _chat_embedder
     if _chat_embedder is None:
-        cfg = load_cfg()
-        _chat_embedder = __import__("agent", fromlist=["setup_embedder"]).setup_embedder(cfg)
+        with _chat_lock:
+            if _chat_embedder is None:
+                _chat_embedder = agent.setup_embedder(load_cfg())
     return _chat_embedder
 
 
@@ -876,22 +917,28 @@ _reranker = {"model": None, "obj": None}
 
 
 def get_chat_reranker():
-    """Lazy-loaded cross-encoder reranker (None if disabled/config missing)."""
-    global _reranker
+    """Lazy-loaded cross-encoder reranker (None if disabled/config missing).
+
+    Guarded by ``_chat_lock`` so concurrent first requests load the (large)
+    model once instead of racing.
+    """
     cfg = load_cfg()
     model = cfg.get("rerank_model")
     if not cfg.get("rerank_enabled", True) or not model:
         return None
     if _reranker["model"] != model:
-        print(f"[chat] loading reranker: {model} ...", flush=True)
-        try:
-            from sentence_transformers import CrossEncoder
-            _reranker["model"] = model
-            _reranker["obj"] = CrossEncoder(model, device=resolve_device(cfg.get("embed_device")))
-        except Exception as e:
-            print(f"[chat] reranker load failed, reranking disabled: {e}")
-            _reranker["model"] = model
-            _reranker["obj"] = None
+        with _chat_lock:
+            if _reranker["model"] != model:
+                print(f"[chat] loading reranker: {model} ...", flush=True)
+                try:
+                    from sentence_transformers import CrossEncoder
+                    _reranker["model"] = model
+                    _reranker["obj"] = CrossEncoder(
+                        model, device=resolve_device(cfg.get("embed_device")))
+                except Exception as e:
+                    print(f"[chat] reranker load failed, reranking disabled: {e}")
+                    _reranker["model"] = model
+                    _reranker["obj"] = None
     return _reranker["obj"]
 
 
@@ -1632,7 +1679,7 @@ def maybe_catalog(set_name, query, conv_id=None, filter_kind=None):
 
     try:
         collection = get_chat_collection(set_name)
-    except SystemExit:
+    except (SystemExit, CollectionNotFound):
         return None
     if collection.count() == 0:
         return None
@@ -1736,7 +1783,7 @@ def _quiz_plan_collection(set_name):
     """Return (collection, embedder) for planner topic ranking; None-guarded."""
     try:
         collection = get_chat_collection(set_name)
-    except SystemExit:
+    except (SystemExit, CollectionNotFound):
         collection = None
     embedder = None
     if collection is not None and collection.count() > 0:
@@ -1833,7 +1880,7 @@ def api_quiz_books():
     collection = None
     try:
         collection = get_chat_collection(set_name)
-    except SystemExit:
+    except (SystemExit, CollectionNotFound):
         pass
     if collection is None or collection.count() == 0:
         return jsonify({"books": []})
@@ -1881,18 +1928,33 @@ def _quiz_generate_sse(set_name, spec, cfg):
     import json as _json
     import queue as _queue
     evq = _queue.Queue()
+    cancel = threading.Event()
+
+    def _check():
+        if cancel.is_set():
+            raise _StreamCancelled()
+
+    def _on_delta(ev):
+        _check()
+        evq.put(("delta", ev))
+
+    def _on_progress(msg):
+        _check()
+        evq.put(("progress", {"message": msg}))
 
     def _worker():
         try:
             result = quiz_build.build_quiz(
                 spec, set_name, cfg, get_chat_client(),
-                stream_cb=lambda ev: evq.put(("delta", ev)),
-                progress_cb=lambda msg: evq.put(("progress", {"message": msg})),
+                stream_cb=_on_delta,
+                progress_cb=_on_progress,
                 collection=get_chat_collection(set_name),
                 embedder=get_chat_embedder(),
             )
             evq.put(("done", result))
-        except SystemExit:
+        except _StreamCancelled:
+            print("[quiz/generate] client disconnected; build aborted", flush=True)
+        except (SystemExit, CollectionNotFound):
             evq.put(("error", "Collection not available for this set."))
         except Exception as e:
             print(f"[quiz/generate] failed: {e}", flush=True)
@@ -1900,19 +1962,24 @@ def _quiz_generate_sse(set_name, spec, cfg):
 
     t = threading.Thread(target=_worker, daemon=True)
     t.start()
-    while True:
-        kind, payload = evq.get()
-        if kind == "progress":
-            yield "event: progress\ndata: " + _json.dumps(payload) + "\n\n"
-        elif kind == "delta":
-            # Follow the chat deltas convention: a top-level object.
-            yield "event: delta\ndata: " + _json.dumps({"wave": payload}) + "\n\n"
-        elif kind == "error":
-            yield "event: error\ndata: " + _json.dumps({"error": payload}) + "\n\n"
-            return
-        elif kind == "done":
-            yield "event: done\ndata: " + _json.dumps(payload) + "\n\n"
-            return
+    try:
+        while True:
+            kind, payload = evq.get()
+            if kind == "progress":
+                yield "event: progress\ndata: " + _json.dumps(payload) + "\n\n"
+            elif kind == "delta":
+                # Follow the chat deltas convention: a top-level object.
+                yield "event: delta\ndata: " + _json.dumps({"wave": payload}) + "\n\n"
+            elif kind == "error":
+                yield "event: error\ndata: " + _json.dumps({"error": payload}) + "\n\n"
+                return
+            elif kind == "done":
+                yield "event: done\ndata: " + _json.dumps(payload) + "\n\n"
+                return
+    finally:
+        # Runs on normal completion and on GeneratorExit (client disconnect),
+        # signalling the worker to abort at its next callback.
+        cancel.set()
 
 
 @app.route("/api/quizzes", methods=["GET"])
@@ -2013,10 +2080,11 @@ def api_quiz_answer(quiz_id):
         return jsonify({"error": "Quiz not found."}), 404
     data = request.get_json(force=True, silent=True) or {}
     attempt_id = data.get("attempt_id")
-    qid = str(data.get("qid"))
+    raw_qid = data.get("qid")
     response = data.get("response")
-    if not attempt_id or qid is None:
+    if not attempt_id or raw_qid is None or str(raw_qid) == "":
         return jsonify({"error": "attempt_id and qid are required."}), 400
+    qid = str(raw_qid)
     attempts = quiz.get("attempts") or []
     attempt = next((a for a in attempts if a.get("attempt_id") == attempt_id), None)
     if not attempt:
@@ -2277,7 +2345,7 @@ def api_course_summary():
             get_chat_client())
         return jsonify({"work": work, "set_name": set_name,
                         "matched": matched, "summary": summary})
-    except SystemExit:
+    except (SystemExit, CollectionNotFound):
         return jsonify({"error": "collection unavailable"}), 400
     except Exception as e:
         print(f"[course] summary failed: {e}", flush=True)
@@ -2336,7 +2404,7 @@ def api_course_quiz_unit():
     set_name = data.get("set_name") or "library"
     work = (data.get("work") or "").strip()
     unit_id = (data.get("unit_id") or "").strip()
-    count = int(data.get("count") or 10)
+    count = _as_int(data.get("count"), 10, 1, 100)
     if not work or not unit_id:
         return jsonify({"error": "work and unit_id are required"}), 400
     try:
@@ -2345,7 +2413,7 @@ def api_course_quiz_unit():
             {"mode": "sections", "work": work, "unit_ids": [unit_id],
              "count": count}, set_name, load_cfg(),
             embedder=get_chat_embedder(), collection=collection)
-    except SystemExit:
+    except (SystemExit, CollectionNotFound):
         return jsonify({"error": "collection unavailable"}), 400
     except Exception as e:
         print(f"[course] quiz-unit plan failed: {e}", flush=True)
@@ -2417,7 +2485,7 @@ def _quiz_spec_proposal(set_name, topic, count, cfg, conv_id, filter_kind=None):
             {"mode": "topic", "topic": topic, "count": count,
              "difficulty": "mixed"}, set_name, cfg,
             embedder=get_chat_embedder(), collection=collection)
-    except SystemExit:
+    except (SystemExit, CollectionNotFound):
         return None
     except Exception as e:
         print(f"[quiz] spec proposal failed: {e}", flush=True)
@@ -2559,7 +2627,7 @@ def maybe_quiz(set_name, query, conv_id=None, filter_kind=None):
 
     try:
         collection = get_chat_collection(set_name)
-    except SystemExit:
+    except (SystemExit, CollectionNotFound):
         return None
     if collection.count() == 0:
         return None
@@ -2652,7 +2720,7 @@ def _prepare_rag(set_name, query, top_k, filter_kind, history=None):
     cfg = load_cfg()
     try:
         collection = get_chat_collection(set_name)
-    except SystemExit:
+    except (SystemExit, CollectionNotFound):
         return {"error": f"Collection '{set_name}' not found. Run ingestion first."}
     if collection.count() == 0:
         return {"error": f"Collection '{set_name}' is empty."}
@@ -2666,6 +2734,7 @@ def _prepare_rag(set_name, query, top_k, filter_kind, history=None):
         embedder=embedder, collection=collection,
         client=get_chat_client(),
         reranker=get_chat_reranker(),
+        backend=cfg.get("lexical_backend", "auto"),
     )
 
     title_mode = rag_result["title_mode"]
@@ -2753,7 +2822,7 @@ def run_rag_chat(set_name, query, top_k=None, filter_kind=None, history=None):
                     "fiction_only": result.get("fiction_only", False),
                     "low_relevance": result.get("low_relevance", False),
                     "relevance_reason": result.get("relevance_reason", "")}, 200
-        except SystemExit:
+        except (SystemExit, CollectionNotFound):
             # setup_chroma signals a missing collection via sys.exit; fall
             # through to _prepare_rag's clean {"error": ...} response below
             # instead of letting SystemExit escape and drop the connection.
@@ -2844,7 +2913,8 @@ def api_chat():
     query = data.get("query", "").strip()
     if not query:
         return jsonify({"error": "No question"}), 400
-    top_k = int(data.get("top_k", load_cfg().get("retrieval_top_k", 10)))
+    top_k = _as_int(data.get("top_k", load_cfg().get("retrieval_top_k", 10)),
+                    10, 1, 50)
     filter_kind = data.get("filter_kind")
     conv_id = data.get("conversation_id")
     quiz = maybe_quiz(set_name, query, conv_id, filter_kind)
@@ -2902,7 +2972,8 @@ def api_chat_stream():
     query = data.get("query", "").strip()
     if not query:
         return jsonify({"error": "No question"}), 400
-    top_k = int(data.get("top_k", load_cfg().get("retrieval_top_k", 10)))
+    top_k = _as_int(data.get("top_k", load_cfg().get("retrieval_top_k", 10)),
+                    10, 1, 50)
     filter_kind = data.get("filter_kind")
     conv_id = data.get("conversation_id")
     history = _conversation_history(conv_id)
@@ -2953,23 +3024,30 @@ def _stream_sse(set_name, query, top_k, filter_kind, history, conv_id):
             collection = get_chat_collection(set_name)
             import agent as _agent_mod
             _matched = _agent_mod._match_titles(query, set_name)
-        except SystemExit:
+        except (SystemExit, CollectionNotFound):
             pass
         if _matched and collection is not None:
             import queue as _queue
             evq = _queue.Queue()
+            cancel = threading.Event()
 
             def _worker():
                 try:
                     def _progress_cb(msg):
+                        if cancel.is_set():
+                            raise _StreamCancelled()
                         evq.put(("progress", {"message": msg}))
                     def _stream_cb(t):
+                        if cancel.is_set():
+                            raise _StreamCancelled()
                         evq.put(("delta", t))
                     map_reduce_summary(
                         set_name, _matched, cfg, collection,
                         get_chat_embedder(), get_chat_client(),
                         progress_cb=_progress_cb, stream_cb=_stream_cb)
                     evq.put(("done", True))
+                except _StreamCancelled:
+                    print("[chat] client disconnected; map-reduce aborted", flush=True)
                 except Exception as e:
                     print(f"[chat] streamed map-reduce failed ({e})", flush=True)
                     evq.put(("error", str(e)))
@@ -2977,20 +3055,23 @@ def _stream_sse(set_name, query, top_k, filter_kind, history, conv_id):
             t = threading.Thread(target=_worker, daemon=True)
             t.start()
             parts = []
-            while True:
-                kind, data = evq.get()
-                if kind == "progress":
-                    yield "event: progress\ndata: " + _json.dumps(
-                        {"message": data["message"]}) + "\n\n"
-                elif kind == "delta":
-                    parts.append(data)
-                    yield "event: delta\ndata: " + _json.dumps(data) + "\n\n"
-                elif kind == "error":
-                    yield "event: error\ndata: " + _json.dumps(
-                        {"error": data}) + "\n\n"
-                    return
-                elif kind == "done":
-                    break
+            try:
+                while True:
+                    kind, data = evq.get()
+                    if kind == "progress":
+                        yield "event: progress\ndata: " + _json.dumps(
+                            {"message": data["message"]}) + "\n\n"
+                    elif kind == "delta":
+                        parts.append(data)
+                        yield "event: delta\ndata: " + _json.dumps(data) + "\n\n"
+                    elif kind == "error":
+                        yield "event: error\ndata: " + _json.dumps(
+                            {"error": data}) + "\n\n"
+                        return
+                    elif kind == "done":
+                        break
+            finally:
+                cancel.set()
             text = "".join(parts).strip()
             if not text:
                 yield "event: error\ndata: " + _json.dumps(
@@ -3011,6 +3092,17 @@ def _stream_sse(set_name, query, top_k, filter_kind, history, conv_id):
             (cfg.get("chat_mode") or "agentic") != "single":
         import queue as _queue
         evq = _queue.Queue()
+        cancel = threading.Event()
+
+        def _agent_progress(msg):
+            if cancel.is_set():
+                raise _StreamCancelled()
+            evq.put(("progress", {"message": msg}))
+
+        def _agent_delta(t):
+            if cancel.is_set():
+                raise _StreamCancelled()
+            evq.put(("delta", t))
 
         def _agent_worker():
             try:
@@ -3022,11 +3114,13 @@ def _stream_sse(set_name, query, top_k, filter_kind, history, conv_id):
                     embedder=get_chat_embedder(),
                     collection=get_chat_collection(set_name),
                     reranker=get_chat_reranker(),
-                    progress_cb=lambda msg: evq.put(("progress", {"message": msg})),
-                    stream_cb=lambda t: evq.put(("delta", t)),
+                    progress_cb=_agent_progress,
+                    stream_cb=_agent_delta,
                 )
                 evq.put(("done", result))
-            except SystemExit:
+            except _StreamCancelled:
+                print("[chat] client disconnected; agent loop aborted", flush=True)
+            except (SystemExit, CollectionNotFound):
                 # setup_chroma() signals a missing collection via sys.exit;
                 # SystemExit is NOT an Exception, so without this the worker
                 # would die silently and the queue drain below would hang the
@@ -3047,21 +3141,24 @@ def _stream_sse(set_name, query, top_k, filter_kind, history, conv_id):
         t.start()
         agent_parts = []
         agent_done = None
-        while True:
-            kind, data = evq.get()
-            if kind == "progress":
-                yield "event: progress\ndata: " + _json.dumps(
-                    {"message": data["message"]}) + "\n\n"
-            elif kind == "delta":
-                agent_parts.append(data)
-                yield "event: delta\ndata: " + _json.dumps(data) + "\n\n"
-            elif kind == "error":
-                yield "event: error\ndata: " + _json.dumps(
-                    {"error": data}) + "\n\n"
-                return
-            elif kind == "done":
-                agent_done = data
-                break
+        try:
+            while True:
+                kind, data = evq.get()
+                if kind == "progress":
+                    yield "event: progress\ndata: " + _json.dumps(
+                        {"message": data["message"]}) + "\n\n"
+                elif kind == "delta":
+                    agent_parts.append(data)
+                    yield "event: delta\ndata: " + _json.dumps(data) + "\n\n"
+                elif kind == "error":
+                    yield "event: error\ndata: " + _json.dumps(
+                        {"error": data}) + "\n\n"
+                    return
+                elif kind == "done":
+                    agent_done = data
+                    break
+        finally:
+            cancel.set()
         answer = "".join(agent_parts).strip()
         if not answer and agent_done and agent_done.get("answer"):
             answer = agent_done["answer"].strip()
@@ -3160,7 +3257,7 @@ def api_openai_chat():
     cfg = load_cfg()
     set_name = data.get("collection") or data.get("set") or data.get("user") \
         or default_set_name()
-    top_k = int(data.get("top_k", cfg.get("retrieval_top_k", 10)))
+    top_k = _as_int(data.get("top_k", cfg.get("retrieval_top_k", 10)), 10, 1, 50)
     filter_kind = data.get("filter_kind")
     model = data.get("model") or cfg.get("llm_model", "default")
 
@@ -3287,19 +3384,25 @@ def _sse_wrap(set_name, query, history, top_k, filter_kind, model):
 
     cfg = load_cfg()
     client = get_chat_client()
-    stream = client.chat.completions.create(
-        model=model,
-        messages=payload["messages"],
-        temperature=cfg.get("llm_temperature", 0.3),
-        max_tokens=cfg.get("llm_max_tokens", 2048),
-        stream=True,
-    )
-    for chunk in stream:
-        delta = chunk.choices[0].delta if chunk.choices else None
-        text = getattr(delta, "content", None) if delta else None
-        if text:
-            yield "data: " + _json.dumps({
-                "choices": [{"delta": {"content": text}}]}) + "\n\n"
+    try:
+        stream = client.chat.completions.create(
+            model=model,
+            messages=payload["messages"],
+            temperature=cfg.get("llm_temperature", 0.3),
+            max_tokens=cfg.get("llm_max_tokens", 2048),
+            stream=True,
+        )
+        for chunk in stream:
+            delta = chunk.choices[0].delta if chunk.choices else None
+            text = getattr(delta, "content", None) if delta else None
+            if text:
+                yield "data: " + _json.dumps({
+                    "choices": [{"delta": {"content": text}}]}) + "\n\n"
+    except Exception as e:
+        # External OpenAI-compatible clients would otherwise hang with no
+        # error frame and no [DONE] if the upstream stream dies mid-response.
+        yield "event: error\n"
+        yield f"data: {_json.dumps({'error': str(e)})}\n\n"
     yield "data: [DONE]\n\n"
 
 

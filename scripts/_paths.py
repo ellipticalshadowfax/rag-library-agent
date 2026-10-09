@@ -15,6 +15,8 @@ in-place install).
 import hashlib
 import json
 import os
+import re
+import tempfile
 from pathlib import Path
 
 _CODE_ROOT = Path(__file__).resolve().parent.parent
@@ -22,6 +24,22 @@ _CODE_ROOT = Path(__file__).resolve().parent.parent
 # Keys that must never be persisted to the git-tracked config.json or returned
 # to the client. They live in the gitignored config.local.json instead.
 SECRET_KEYS = ("llm_api_key",)
+
+# Store ids (conversations, quiz specs, quizzes) are generated as
+# uuid4().hex[:12]; only that shape may be joined into a filesystem path.
+_RAW_ID_RE = re.compile(r"^[0-9a-f]{12}$")
+
+
+def safe_id(value) -> str:
+    """Return a validated store id, or "" for anything else.
+
+    Guards raw-id path joins: a crafted id containing ``/``, ``..`` or other
+    path metacharacters must never reach ``Path / id`` (see chat_store._path,
+    quiz_store._spec_path/_quiz_path). Generated ids are always 12 hex chars.
+    """
+    s = str(value or "")
+    return s if _RAW_ID_RE.match(s) else ""
+
 
 
 def rag_root() -> Path:
@@ -46,6 +64,29 @@ def merge_local_config(cfg: dict) -> dict:
     for k, v in load_local_overrides().items():
         cfg[k] = v
     return cfg
+
+
+def atomic_write_json(path, data, indent: int = 2) -> None:
+    """Write ``data`` as JSON via a temp file + ``os.replace``.
+
+    A crash or full disk mid-write can otherwise truncate config.json or a
+    conversation file to invalid JSON, losing all settings/history. The unique
+    temp name keeps concurrent writers from clobbering each other's partial file.
+    """
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(p.parent), prefix="." + p.name + ".",
+                               suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=indent)
+        os.replace(tmp, p)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def ocr_cache_name(fpath) -> str:

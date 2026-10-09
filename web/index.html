@@ -967,7 +967,9 @@ function escapeHtml(s) {
 
 let mdConfig = null;
 function mdSanitize(html) {
-  if (typeof DOMPurify === 'undefined') return html; // degrade: no sanitizer
+  // Fail closed: if the sanitizer didn't load (vendor file blocked/corrupted),
+  // escape the markup rather than injecting it raw (LLM output is untrusted).
+  if (typeof DOMPurify === 'undefined') return escapeHtml(String(html == null ? '' : html));
   mdConfig = mdConfig || { ALLOWED_TAGS: ['p','br','hr','h1','h2','h3','h4','h5','h6','strong','em','del','u','code','pre','blockquote','ul','ol','li','a','table','thead','tbody','tr','th','td','details','summary','span','div' ], ALLOWED_ATTR: ['href','class','title','open'], ALLOW_DATA_ATTR: false };
   const purify = (typeof DOMPurify.sanitize === 'function') ? DOMPurify
     : (typeof DOMPurify.default === 'object' && DOMPurify.default.sanitize ? DOMPurify.default : DOMPurify(window));
@@ -2225,7 +2227,7 @@ async function loadCourse() {
   if (data.error) { $('#courseUnits').innerHTML = '<div class="small muted">' + escapeHtml(data.error) + '</div>'; return; }
   const units = data.units || [];
   const quizzed = data.quizzed_count || 0;
-  $('#courseStats').innerHTML = `<b>${data.title}</b> — ${units.length} unit(s), ` +
+  $('#courseStats').innerHTML = `<b>${escapeHtml(data.title)}</b> — ${units.length} unit(s), ` +
     `<b>${quizzed}</b> quizzed so far` +
     ` ${data.unit_count ? `(${Math.round(quizzed / data.unit_count * 100)}%)` : ''}` +
     (data.warnings && data.warnings.length ? ' <span class="small muted">' + escapeHtml(data.warnings[0]) + '</span>' : '');

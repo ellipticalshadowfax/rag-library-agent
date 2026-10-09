@@ -69,15 +69,15 @@ is re-pointed to a different directory while the old files still exist on disk
 the prune condition and their chunks stay orphaned. Pruning also skips
 `only_path` runs.
 
-## 5. `agent.py` hardcodes the manifest path instead of using `rag_root()` — MINOR
+## 5. `agent.py` hardcodes the manifest path instead of using `rag_root()` — FIXED
 
 All manifest accesses in `agent.py` (BM25 hydration, parent-text store, title
-matching) now use `rag_root() / "manifest.db"` (`scripts/agent.py:251,677,857`),
-matching `ingest.py`, `server.py`, and `mcp_server.py`. In a symlinked
-deployment where data lives outside the code root, `agent.py` now resolves the
-same manifest as the rest of the app.
+matching) use `rag_root() / "manifest.db"` (`scripts/agent.py`), matching
+`ingest.py`, `server.py`, and `mcp_server.py`. In a symlinked deployment where
+data lives outside the code root, `agent.py` now resolves the same manifest as
+the rest of the app.
 
-Residual: the `cmd_collections` CLI helper still derives its index path from the
-code location (`rag_root = Path(__file__).resolve().parent.parent`,
-`scripts/agent.py:1125`) instead of the `rag_root()` accessor, so `--collections`
-ignores `RAG_ROOT`. (See `errorsandbugs.md` §A17.)
+The `cmd_collections` CLI helper is fixed too: it now builds its index path
+from the `rag_root()` accessor instead of `Path(__file__).resolve().parent.parent`,
+so `--collections` honors `RAG_ROOT`. (Previously tracked as `errorsandbugs.md`
+§A17; the `/sources` NameError from the same finding is also fixed.)

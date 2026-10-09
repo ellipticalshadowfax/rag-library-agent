@@ -349,3 +349,65 @@ Line numbers refer to the repo as of commit `d559718`.
 - Offline eval harness (`scripts/eval.py run/diff`) NOT executed — requires
   an ingested index for the golden set's collections, which this checkout
   doesn't have (`manifest.db` empty, `index/` bare).
+
+---
+
+## D. Resolution log (2026-10-09)
+
+Status of the findings above. High/medium A-items (A1–A16) were fixed in commit
+`76e2842`. The low-severity A-items and the live B-items were addressed in the
+follow-up pass; entries left untouched are noted with a reason.
+
+**Fixed (A-family, low severity):**
+- **A17** `agent.py` CLI: `/sources` no longer `NameError`s (`hits = []`
+  initialized before the REPL); `cmd_collections` uses `rag_root()`.
+- **A18** Web UI: `mdSanitize` now fails **closed** (escapes) when DOMPurify is
+  missing; the course title is escaped before `innerHTML`.
+- **A19** `_read_ocr_lock` coerces non-object JSON to `None`; malformed/
+  missing `pid` no longer raises `TypeError` → 500.
+- **A20** `api_quiz_answer` validates a missing/empty `qid` before coercing to
+  `str` (400, not the string `"None"` → 404).
+- **A21** Drift: `config.json` `exclude` personal entry removed; `ocr_compare`
+  no longer bakes machine-specific tesseract paths (env/PATH only); the
+  web-chat path now passes `lexical_backend` to `retrieve_rag`. (README tab
+  count was already fixed in `3ba4a19`.)
+- **A22** Background SSE workers (agent loop, map-reduce, quiz build) now take
+  a `threading.Event`; the generator's `finally` sets it on client disconnect,
+  and the callbacks raise `_StreamCancelled` to abort the worker.
+
+**Fixed (B-family):**
+- **S3** Raw-id path joins (`chat_store._path`,
+  `quiz_store._spec_path`/`_quiz_path`, syllabus slug/hash) now require a
+  generated 12-hex id via `_paths.safe_id`; invalid ids map to a sentinel.
+- **S5** `MAX_CONTENT_LENGTH` (64 MiB) added; untrusted counts/`top_k` go
+  through `_as_int` (clamped, no `ValueError` → 500).
+- **P1/P5** BM25 build is double-checked under a lock; a Chroma-built index is
+  persisted back with `replace_bm25`; the per-set title list is cached; the
+  server invalidates both caches when an ingest starts.
+- **P3** `rerank_hits` caps cross-encoded candidates (default `2*top_n`).
+- **P4** `_chat_lock` now guards lazy client/embedder/reranker init (double-
+  checked).
+- **R2** `_sse_wrap` wraps the upstream LLM stream in try/except and always
+  emits `[DONE]`.
+- **R4** `config*.json` and conversation writes go through
+  `_paths.atomic_write_json` (temp file + `os.replace`).
+- **R5** `merge_text_into_pdf` closes the fitz document in a `finally`.
+- **R6** `setup_chroma` raises `agent.CollectionNotFound` (a normal
+  `Exception`) instead of `sys.exit(1)`; all server `except SystemExit` guards
+  were widened to catch it (eval too). CLI keeps a clean exit.
+
+**Deliberately left as-is:**
+- **S1** (no auth / open CORS) — deferred by decision (trusted-LAN only).
+- **S4** (SSRF via `llm_base_url`), **S6** (`/api/fs`, `/api/embed/load`) —
+  remain host-trust features; not changed without a product decision.
+- **P2** single-shot retrieval still runs before the first SSE byte.
+- **R5** (shared `INGEST_STATE`/`OCR_STATE` dict mutations without locks) —
+  broad; the concrete fitz leak was fixed, the rest left for a dedicated pass.
+- **S2** `agent_loop.setup_chroma` self-init path now raises normally, which
+  callers already handle via `except Exception`.
+
+Verification this pass: `python -m py_compile scripts/*.py` clean; `node --check`
+on the extracted inline JS clean; targeted functional checks for `safe_id`,
+`atomic_write_json`, `ocr_cache_name`, store-path guards, `extract_count`,
+`_as_int`, `rerank_hits` capping and cache invalidation all pass. The offline
+eval harness was **not** run (no ingested index, as in §Verification above).

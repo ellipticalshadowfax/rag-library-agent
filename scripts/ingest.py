@@ -603,6 +603,7 @@ def merge_text_into_pdf(pdf_path: str, text_path: str) -> bool:
     if not page_texts:
         return False
 
+    doc = None
     try:
         doc = fitz.open(pdf_path)
         added = 0
@@ -617,11 +618,18 @@ def merge_text_into_pdf(pdf_path: str, text_path: str) -> bool:
                                 render_mode=3, align=0)
             added += 1
         doc.save(pdf_path, incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
-        doc.close()
         return added > 0
     except Exception as e:
         console.print(f"[red]merge_text_into_pdf failed for {pdf_path}: {e}[/red]")
         return False
+    finally:
+        # Close the document even when insert/save raises, so the file handle
+        # isn't leaked (the old close() ran only on the success path).
+        if doc is not None:
+            try:
+                doc.close()
+            except Exception:
+                pass
 
 # ─── Structure Detection (section maps for boundary-aware chunking) ──────────
 #

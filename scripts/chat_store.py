@@ -12,13 +12,24 @@ import time
 import uuid
 from pathlib import Path
 
-from _paths import rag_root
+from _paths import atomic_write_json, rag_root, safe_id
 
 CONV_DIR = rag_root() / "conversations"
 
 
 def _path(cid: str) -> Path:
+    # Only generated 12-hex ids may be joined into a path; an invalid/forged id
+    # maps to a sentinel that never exists, so reads return None and deletes are
+    # no-ops instead of escaping CONV_DIR via traversal.
+    cid = safe_id(cid)
+    if not cid:
+        return CONV_DIR / "__invalid__.json"
     return CONV_DIR / f"{cid}.json"
+
+
+def _save(conv: dict) -> None:
+    """Persist a conversation atomically (temp file + os.replace)."""
+    atomic_write_json(_path(conv.get("id")), conv)
 
 
 def _now() -> int:
@@ -68,7 +79,7 @@ def create_conversation(title: str = None, set: str = "") -> dict:
         "updated": now,
         "messages": [],
     }
-    _path(cid).write_text(json.dumps(conv, indent=2), encoding="utf-8")
+    _save(conv)
     return conv
 
 
@@ -89,7 +100,7 @@ def update_conversation(cid: str, title: str = None, set: str = None) -> dict | 
     if set is not None:
         conv["set"] = set
     conv["updated"] = _now()
-    _path(cid).write_text(json.dumps(conv, indent=2), encoding="utf-8")
+    _save(conv)
     return conv
 
 
@@ -102,7 +113,7 @@ def clear_conversation(cid: str) -> dict | None:
     conv["title"] = "New chat"
     conv.pop("pending_catalog", None)
     conv["updated"] = _now()
-    _path(cid).write_text(json.dumps(conv, indent=2), encoding="utf-8")
+    _save(conv)
     return conv
 
 
@@ -116,7 +127,7 @@ def set_pending_catalog(cid: str, pending: dict | None) -> dict | None:
     else:
         conv.pop("pending_catalog", None)
     conv["updated"] = _now()
-    _path(cid).write_text(json.dumps(conv, indent=2), encoding="utf-8")
+    _save(conv)
     return conv
 
 
@@ -143,7 +154,7 @@ def set_pending_quiz_spec(cid: str, pending: dict | None) -> dict | None:
     else:
         conv.pop("pending_quiz_spec", None)
     conv["updated"] = _now()
-    _path(cid).write_text(json.dumps(conv, indent=2), encoding="utf-8")
+    _save(conv)
     return conv
 
 
@@ -169,5 +180,5 @@ def add_message(cid: str, role: str, content: str, meta: dict = None) -> dict | 
         title = " ".join(content.strip().split())
         conv["title"] = (title[:42] + "…") if len(title) > 42 else title
     conv["updated"] = _now()
-    _path(cid).write_text(json.dumps(conv, indent=2), encoding="utf-8")
+    _save(conv)
     return conv
