@@ -12,7 +12,6 @@ license = { text = "MIT" }
 dependencies = [
     # Web app
     "Flask>=3",
-    "flask-cors>=6",
 
     # Vector store / retrieval
     "chromadb>=1.5",

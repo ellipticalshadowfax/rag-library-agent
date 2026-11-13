@@ -21,7 +21,6 @@ from concurrent.futures import ThreadPoolExecutor
 os.environ.setdefault("HF_HUB_OFFLINE", "1")  # Skip HuggingFace remote checks; models cached from first-run
 
 from flask import Flask, jsonify, request, send_from_directory, Response
-from flask_cors import CORS
 
 from _paths import (SECRET_KEYS, atomic_write_json, cuda_available, rag_root,
                     resolve_device)
@@ -45,7 +44,46 @@ import quiz_syllabus
 import quiz_store
 
 app = Flask(__name__, static_folder=str(RAG_ROOT / "web"), static_url_path="/web")
-CORS(app)
+
+# ─── Request origin guard ────────────────────────────────────────────────────
+# The API has no auth and is meant for local use. Without this guard any
+# website open in the user's browser could call it (CORS-less simple POSTs and
+# DNS rebinding both reach loopback). We therefore:
+#   * require the Host header to name a loopback host (or one listed in
+#     RAG_ALLOWED_HOSTS, comma-separated) — defeats DNS rebinding;
+#   * reject requests carrying an Origin whose host isn't allowed — defeats
+#     cross-site fetch/XHR from other pages.
+# Non-browser clients (curl, MCP, OpenAI-compatible tools) send no Origin and
+# are unaffected as long as they use an allowed Host.
+_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]"}
+
+
+def _allowed_hosts() -> set:
+    extra = {h.strip().lower() for h in
+             os.environ.get("RAG_ALLOWED_HOSTS", "").split(",") if h.strip()}
+    bind = os.environ.get("RAG_HOST", "127.0.0.1").strip().lower()
+    return _LOOPBACK_HOSTS | extra | ({bind} if bind not in ("0.0.0.0", "::") else set())
+
+
+def _hostname(netloc: str) -> str:
+    netloc = (netloc or "").strip().lower()
+    if netloc.startswith("["):  # [::1]:5000
+        return netloc.split("]")[0] + "]"
+    return netloc.split(":")[0]
+
+
+@app.before_request
+def _guard_origin():
+    allowed = _allowed_hosts()
+    if _hostname(request.host) not in allowed:
+        return jsonify({"error": "Host not allowed."}), 403
+    origin = request.headers.get("Origin")
+    if origin and origin != "null":
+        from urllib.parse import urlsplit
+        if _hostname(urlsplit(origin).netloc) not in allowed:
+            return jsonify({"error": "Cross-origin requests are not allowed."}), 403
+    elif origin == "null":
+        return jsonify({"error": "Cross-origin requests are not allowed."}), 403
 
 app.config["JSON_AS_ASCII"] = False
 # Cap request-body size so a huge/streamed POST can't exhaust memory.
@@ -128,6 +166,9 @@ _OCR_PROC = None
 
 def load_cfg():
     return ING.load_config()
+
+
+_CFG_LOCK = threading.RLock()  # serialises config read-modify-write cycles
 
 
 def save_cfg(cfg):
@@ -650,18 +691,30 @@ def live_ingest_pid():
     return None
 
 
+_START_LOCK = threading.Lock()  # makes check-active + spawn atomic
+
+
 def start_ingest(target, set_name, force=False, only=None):
+    with _START_LOCK:
+        return _start_ingest(target, set_name, force, only)
+
+
+def _start_ingest(target, set_name, force=False, only=None):
     global _INGEST_PROC
     if ingest_active():
         return False, "An ingest is already running (started here or externally)."
-    cfg = load_cfg()
-    if not set_name:
-        set_name = f"set{len(cfg['sets'])+1}"
     if not target:
         return False, "No source directory specified."
-    # Remember this set/location so the Collections panel can offer update/rename.
-    cfg.setdefault("sets", {})[set_name] = {"path": str(target), "kind": "local"}
-    save_cfg(cfg)
+    target = os.path.abspath(os.path.expanduser(str(target)))
+    if not os.path.isdir(target):
+        return False, f"Not a directory: {target}"
+    with _CFG_LOCK:
+        cfg = load_cfg()
+        if not set_name:
+            set_name = f"set{len((cfg.get('sets') or {}))+1}"
+        # Remember this set/location so the Collections panel can offer update/rename.
+        cfg.setdefault("sets", {})[set_name] = {"path": str(target), "kind": "local"}
+        save_cfg(cfg)
 
     cmd = [sys.executable, str(SCRIPTS_DIR / "ingest.py"), str(target), "--set", set_name]
     if force:
@@ -853,11 +906,18 @@ def live_ocr_pid():
 
 
 def start_ocr(target, mode="merge", force=False, only=None, languages=None, backend=None):
+    with _START_LOCK:
+        return _start_ocr(target, mode, force, only, languages, backend)
+
+
+def _start_ocr(target, mode="merge", force=False, only=None, languages=None, backend=None):
     global _OCR_PROC
     if ocr_active():
         return False, "An OCR job is already running."
     if not target:
         return False, "No source directory specified."
+    if not os.path.isdir(os.path.expanduser(str(target))):
+        return False, f"Not a directory: {target}"
     cmd = [sys.executable, str(SCRIPTS_DIR / "ocr.py"), str(target), "--mode", mode]
     if force:
         cmd.append("--force")
@@ -967,23 +1027,33 @@ def api_config_schema():
 
 @app.route("/api/config", methods=["POST"])
 def api_config_set():
-    data = request.get_json(force=True)
-    cfg = load_cfg()
-    # Only allow whitelisted keys to update; the allowlist is derived from the
-    # CONFIG_META registry so new keys can never drift out of sync.
-    allowed = _config_writable_keys()
-    for k in allowed:
-        if k not in data:
-            continue
-        if k in SECRET_KEYS and str(data[k]).strip() == API_KEY_MASK:
-            # GET /api/config returns a masked key. A read-modify-write client
-            # that POSTs that value back must not overwrite the real secret
-            # with the literal mask; skip it (writes go via /api/llm/apply).
-            continue
-        cfg[k] = data[k]
+    data = request.get_json(force=True, silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"ok": False, "error": "JSON object expected."}), 400
     if "sets" in data:
-        cfg["sets"] = data["sets"]
-    save_cfg(cfg)
+        sets = data["sets"]
+        if not isinstance(sets, dict) or not all(
+                isinstance(k, str) and isinstance(v, dict)
+                and isinstance(v.get("path", ""), str)
+                for k, v in sets.items()):
+            return jsonify({"ok": False,
+                            "error": "'sets' must map names to {path, kind} objects."}), 400
+    with _CFG_LOCK:
+        cfg = load_cfg()
+        # Only allow whitelisted keys to update; the allowlist is derived from
+        # the CONFIG_META registry so new keys can never drift out of sync.
+        allowed = _config_writable_keys()
+        for k in allowed:
+            if k not in data:
+                continue
+            if k in SECRET_KEYS and str(data[k]).strip() == API_KEY_MASK:
+                # GET /api/config returns a masked key; a read-modify-write
+                # client must not overwrite the real secret with the mask.
+                continue
+            cfg[k] = data[k]
+        if "sets" in data:
+            cfg["sets"] = data["sets"]
+        save_cfg(cfg)
     return jsonify({"ok": True, "config": _public_cfg(cfg)})
 
 
@@ -1230,6 +1300,11 @@ def api_llm_test():
 @app.route("/api/llm/apply", methods=["POST"])
 def api_llm_apply():
     data = request.get_json(force=True) or {}
+    with _CFG_LOCK:
+        return _llm_apply_locked(data)
+
+
+def _llm_apply_locked(data):
     cfg = load_cfg()
     if "llm_base_url" in data and data["llm_base_url"] is not None:
         cfg["llm_base_url"] = str(data["llm_base_url"]).strip()
@@ -1342,7 +1417,7 @@ def api_llm_start():
         return jsonify({"ok": False,
                         "error": "llama-server not found on this machine."}), 400
     models_dir = RAG_ROOT / "models"
-    gguflist = [f for f in models_dir.glob("*.gguf")]
+    gguflist = sorted(models_dir.glob("*.gguf"))
     if not gguflist:
         return jsonify({"ok": False,
                         "error": "No GGUF model in models/ yet."}), 400
