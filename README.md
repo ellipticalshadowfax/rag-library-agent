@@ -100,7 +100,10 @@ Open http://localhost:5000. The app has six tabs:
 
 **Setup** — Configure your library folders, LLM API endpoint, and embedding model.
 There's a folder picker for convenience, and a first-run wizard on fresh installs.
-Saving persists everything to `config.json`.
+Saving persists settings to `config.json`; your collection paths (`sets`) and the
+API key go to the gitignored `config.local.json` instead, so saving a collection
+does not dirty the tracked file. An existing `config.json` with `sets` is migrated
+automatically the first time the app or a script reads it.
 
 **Scan** — A dry run. Counts your files, flags scanned PDFs that need OCR, and
 classifies books as fiction or non-fiction from Calibre tags. Nothing gets indexed.
@@ -310,7 +313,7 @@ For power users who prefer the terminal:
 | File / Directory | What it is |
 |------------------|------------|
 | `config.json` | All settings (embed model, LLM endpoint, chunking, etc.) |
-| `config.local.json` | Machine-specific overrides (gitignored) |
+| `config.local.json` | Machine-specific state (gitignored): collection paths (`sets`), API key, overrides |
 | `index/` | ChromaDB vector index |
 | `manifest.db` | SQLite database tracking file ingest status + BM25 lexical index |
 | `ingest.log` | Full ingest log |
@@ -387,3 +390,10 @@ sits alongside several well-known ones:
   quality but are 4-10x slower.
 - **Portable:** Copy the whole folder to another machine and run `./run.sh`. The
   library itself stays wherever it is.
+- **Local-only API, unrestricted folder browsing.** The web API is meant for the
+  machine it runs on. The origin/host guard in `scripts/server.py` rejects
+  requests whose `Host` or `Origin` is not loopback (or listed in
+  `RAG_ALLOWED_HOSTS`, comma-separated), which blocks DNS-rebinding and
+  cross-site requests. `/api/fs` (the folder picker) lists any readable directory
+  by design: it must reach arbitrary library locations, so it is not limited to a
+  path allowlist. Do not expose the server to untrusted networks.

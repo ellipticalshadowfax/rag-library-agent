@@ -13,10 +13,15 @@ Updating/cloning collection `library` via the web UI sometimes reprocesses the
 entire library instead of only changed files. The web UI does **not** pass
 `--force` by default, so a full reingest is caused by one of the following:
 
-- **Stat-only change detection** (`scripts/ingest.py:1119-1124`). There is no
-  content-hash check — only `(rel_path, mtime, size)`. Copy/restore of the
-  library without `-a`, or tools that rewrite files wholesale, touch every file
-  and trigger a full reindex. Still the primary residual cause.
+- **Stat-only change detection** — mostly addressed. When `mtime` differs but
+  `size` matches, the manifest's `content_hash` (BLAKE2b, written on each
+  successful ingest; see `scripts/ingest.py` `is_current`, `content_digest`) is
+  compared, and a match skips the file and refreshes its mtime. A copy that
+  drops mtimes no longer forces a re-embed. Limits: rows indexed before the
+  column existed have no hash until they are next ingested, so the first run
+  after upgrading still reprocesses touched files that were never re-ingested;
+  and the hash is only consulted when mtime differs, so bytes that change while
+  mtime and size stay identical are still not detected (same as before).
 - **`manifest.db` missing/wiped**. A fresh `RAG_ROOT` or a deleted manifest
   empties the manifest so `is_current()` returns `False` for all files. Inherent
   to stat-based change detection.
@@ -39,9 +44,13 @@ post-merge `mtime`/`size` are written back into the manifest
 newer than the PDF (`ingest.py:1229-1239`), so a merged PDF is seen as current
 and never re-merged.
 
-Residual: `needs_ocr()` still returns `True` on any exception
-(`scripts/ingest.py:487-488`), so if `pdftotext` is missing from PATH every PDF
-is flagged as OCR-needing every run.
+Residual (fixed): `needs_ocr()` used to return `True` on any exception, so a
+machine without `pdftotext` flagged every PDF as OCR-needing on every run. It now
+resolves `pdftotext` once at import (`_PDFTOTEXT`, `scripts/ingest.py`), logs a
+single warning when it is missing, and falls back to a PyMuPDF text-layer check
+of the first 3 pages. The bare `except` is narrowed to the errors pdftotext can
+raise (`OSError`, `TimeoutExpired`) and, for the fallback, the errors PyMuPDF
+raises on unreadable files (`RuntimeError`/`OSError`), which still return `True`.
 
 ## 3. Manifest is not set-aware — FIXED
 
@@ -51,7 +60,7 @@ is flagged as OCR-needing every run.
 `_migrate_legacy_schemas()` (`ingest.py:157-240`) rebuilds legacy tables with
 scoped keys; `is_current()` consults `set_name` (`ingest.py:242-248`); upserts
 conflict on `(rel_path, set_name)`; and `_drop_manifest_set()`
-(`server.py:3326-3341`) deletes only that set's rows, so deleting the row-owning
+(`routes_chat.py:150-165`) deletes only that set's rows, so deleting the row-owning
 collection no longer wipes shared rows for other sets.
 
 ## 4. Stale chunks orphaned in Chroma after a path change — MINOR

@@ -36,7 +36,7 @@ except ImportError:
 
 console = Console()
 
-from _paths import rag_root, ocr_cache_name
+from _paths import load_config_file, rag_root, ocr_cache_name
 
 RAG_ROOT = rag_root()
 SAMPLE_ROOT = Path(os.environ.get("OCR_SAMPLE_DIR", "/tmp/opencode/ocr_samples"))
@@ -51,8 +51,7 @@ ALNUM_OK = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
 
 
 def load_config():
-    with open(RAG_ROOT / "config.json") as f:
-        return json.load(f)
+    return load_config_file()
 
 
 def needs_ocr(pdf_path: str, threshold: int = 50) -> bool:

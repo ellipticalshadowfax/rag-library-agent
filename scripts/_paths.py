@@ -25,6 +25,14 @@ _CODE_ROOT = Path(__file__).resolve().parent.parent
 # to the client. They live in the gitignored config.local.json instead.
 SECRET_KEYS = ("llm_api_key",)
 
+# Machine-specific keys (absolute local paths) that live in config.local.json
+# but are returned to the client like any other setting. Keeping them out of
+# config.json stops every collection save from dirtying the tracked file.
+LOCAL_ONLY_KEYS = ("sets",)
+
+# Everything that is written to config.local.json rather than config.json.
+LOCAL_KEYS = SECRET_KEYS + LOCAL_ONLY_KEYS
+
 # Store ids (conversations, quiz specs, quizzes) are generated as
 # uuid4().hex[:12]; only that shape may be joined into a filesystem path.
 _RAW_ID_RE = re.compile(r"^[0-9a-f]{12}$")
@@ -64,6 +72,61 @@ def merge_local_config(cfg: dict) -> dict:
     for k, v in load_local_overrides().items():
         cfg[k] = v
     return cfg
+
+
+def migrate_local_only_keys(cfg_path=None) -> None:
+    """One-time move of LOCAL_ONLY_KEYS from config.json to config.local.json.
+
+    Existing installs keep ``sets`` inside the tracked config.json. For each
+    local-only key found there, the value is copied into config.local.json
+    unless that file already sets it, then the key is removed from config.json.
+    The effective merged config is unchanged by this: when both files carry the
+    key, config.local.json already wins the merge, so dropping the config.json
+    copy changes nothing a reader sees. Local is written before the tracked
+    file, so a crash between the two leaves a duplicate, never a loss. Failures
+    (read-only checkout, bad JSON) are reported and otherwise ignored, because
+    the merged view still works without the migration.
+    """
+    cfg_path = Path(cfg_path) if cfg_path else rag_root() / "config.json"
+    try:
+        with open(cfg_path, encoding="utf-8") as f:
+            raw = json.load(f)
+    except (OSError, ValueError):
+        return
+    if not isinstance(raw, dict):
+        return
+    found = [k for k in LOCAL_ONLY_KEYS if k in raw]
+    if not found:
+        return
+    try:
+        local = load_local_overrides()
+        changed = False
+        for k in found:
+            if k not in local:
+                local[k] = raw[k]
+                changed = True
+        if changed:
+            atomic_write_json(cfg_path.parent / "config.local.json", local)
+        for k in found:
+            raw.pop(k, None)
+        atomic_write_json(cfg_path, raw)
+    except OSError as e:
+        import sys
+        print(f"[config] could not migrate {found} out of config.json: {e}",
+              file=sys.stderr)
+
+
+def load_config_file() -> dict:
+    """Load config.json with local-only keys migrated, merged with local overrides.
+
+    Every reader of the app config should go through this, not json.load on
+    config.json directly, so none of them miss keys that now live locally.
+    """
+    cfg_path = rag_root() / "config.json"
+    migrate_local_only_keys(cfg_path)
+    with open(cfg_path, encoding="utf-8") as f:
+        cfg = json.load(f)
+    return merge_local_config(cfg)
 
 
 def atomic_write_json(path, data, indent: int = 2) -> None:

@@ -13,7 +13,7 @@ import fitz  # PyMuPDF
 from rich.console import Console
 from rich.table import Table
 
-from _paths import rag_root
+from _paths import load_config_file, rag_root
 from rich import box
 
 console = Console()
@@ -23,9 +23,7 @@ OCR_BACKEND = "pdftotext"
 
 
 def load_config():
-    cfg_path = rag_root() / "config.json"
-    with open(cfg_path) as f:
-        return json.load(f)
+    return load_config_file()
 
 
 def calibre_db_path(target: Path) -> Path | None:

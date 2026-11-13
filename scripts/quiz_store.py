@@ -52,7 +52,12 @@ def _syllabus_dir(set_name: str) -> Path:
 
 
 def _safe(s: str) -> str:
-    return "".join(c if (c.isalnum() or c in "-_.") else "_" for c in s) or "_"
+    out = "".join(c if (c.isalnum() or c in "-_.") else "_" for c in s)
+    # "", "." and ".." are directory references, not names: a set called ".."
+    # would otherwise climb out of quizzes/syllabus/.
+    if not out.strip("."):
+        return "_"
+    return out
 
 
 def _now() -> int:

@@ -266,7 +266,7 @@ for unusual setups:
 | `FUSE_RRF_K` | `agent.py` | `60` | RRF constant; larger flattens scores and weights the lexical leg more. |
 | `MAX_CHUNKS_PER_TITLE` | `agent.py` | `3` | Max chunks kept per distinct title during diversification. |
 | pool cap `min(top_k, 8)` / `min(top_k*3, 30)` | `agent.py` | — | Retrieval pool sizing before rerank. |
-| `HISTORY_MSG_LIMIT` / `HISTORY_CHAR_BUDGET` | `server.py` | `12` / `10000` | Bound on conversation history sent to the LLM. |
+| `HISTORY_MSG_LIMIT` / `HISTORY_CHAR_BUDGET` | `server_core.py` | `12` / `10000` | Bound on conversation history sent to the LLM. |
 | `MAX_CHUNKS_PER_FILE` / `INGEST_BATCH_SIZE` | `ingest.py` | `5000` / `500` | Oversized-file handling and upsert batching. |
 
 ## show_thinking (Qwen3-style thinking models)

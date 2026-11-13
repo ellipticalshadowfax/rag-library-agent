@@ -15,7 +15,7 @@ Line numbers refer to the repo as of commit `d559718`.
 ### High severity
 
 #### 1. `/api/chat/stream` hangs forever when the collection is missing
-- **Location:** `scripts/server.py:2941-2978`
+- **Location:** `scripts/server_core.py:1921-1958`
 - `_agent_worker` calls `get_chat_collection(set_name)` (line 2949), which runs
   `agent.setup_chroma` → `sys.exit(1)` (`scripts/agent.py:99-105`) when the
   collection doesn't exist. `SystemExit` is **not** caught by
@@ -25,15 +25,15 @@ Line numbers refer to the repo as of commit `d559718`.
 - **Repro:** select a deleted/typo set and ask any non-quiz/non-catalog
   question in agentic mode.
 - **Fix:** catch `SystemExit` explicitly in `_agent_worker` (like
-  `_quiz_generate_sse` already does at `server.py:1866`), or wrap
+  `_quiz_generate_sse` already does at `server_core.py:1366`), or wrap
   `evq.get()` loop with a sentinel/timeout; better: stop raising `SystemExit`
   in `setup_chroma` (see R6 / bug 13 below).
 
 #### 2. `_stream_sse` single-shot error path raises KeyError
-- **Location:** `scripts/server.py:2999-3001`
+- **Location:** `scripts/routes_chat.py:72-74`
 - `if "error" in payload: text = payload["answer"]` — but `_prepare_rag`'s
   error dict is `{"error": ...}` only (no `"answer"` key, see
-  `server.py:2577-2590`). With `chat_mode: single` / `agentic_enabled: false`
+  `server_core.py:1557-1570`). With `chat_mode: single` / `agentic_enabled: false`
   and an empty/missing collection, the generator throws → HTTP 500, no SSE
   `error` event for the client.
 - This is a regression of the prior R3 "fix": the call was moved inside the
@@ -41,16 +41,16 @@ Line numbers refer to the repo as of commit `d559718`.
 - **Fix:** read `payload["error"]` and emit an SSE `error` event.
 
 #### 3. `/api/embed/apply` leaks the plaintext API key
-- **Location:** `scripts/server.py:1104-1123`
+- **Location:** `scripts/server_core.py:989-1008`
 - Returns `jsonify({"ok": True, "config": cfg, ...})` where
   `cfg = load_cfg()` includes `llm_api_key` merged from `config.local.json`
   (`scripts/_paths.py:43-47`, `scripts/ingest.py:88-92`). Any client that
   POSTs to this route receives the real key. Every other config endpoint
-  correctly uses `_public_cfg()` (`server.py:140-146`).
+  correctly uses `_public_cfg()` (`server_core.py:96-102`).
 - **Fix:** `"config": _public_cfg(cfg)`.
 
 #### 4. MCP `get_config(keys=[...])` leaks the API key into the chat context
-- **Location:** `scripts/mcp_server.py:615-625`
+- **Location:** `scripts/mcp_server_core.py:571-581`
 - The `keys` parameter echoes `cfg.get(k)` for **any** requested key,
   including `llm_api_key` (config is loaded merged with local overrides).
   Same class as A3; the default `notable` list excludes the key, the
@@ -84,7 +84,7 @@ Line numbers refer to the repo as of commit `d559718`.
 - **Fix:** use `prompt_name="passage"`.
 
 #### 7. Course "quizzed" flag is permanently false
-- **Location:** `scripts/server.py:2169-2183` (`_course_quizzed_counts`)
+- **Location:** `scripts/routes_quiz.py:274-288` (`_course_quizzed_counts`)
 - Iterates `q.get("questions")` over entries from `quiz_store.list_quizzes`,
   but that returns summary dicts only (`id/title/set_name/status/
   question_count/created/updated` — no `questions` key;
@@ -124,11 +124,11 @@ Line numbers refer to the repo as of commit `d559718`.
   tags.
 
 #### 11. `POST /api/config` mask round-trip overwrites the real key
-- **Location:** `scripts/server.py:298-397` (`CONFIG_META`),
-  `server.py:921-934` (`api_config_set`), `server.py:103-110` (`save_cfg`)
-- `llm_api_key` is registered `editable: True` (`server.py:319`), so it is in
-  the derived allowlist (`_config_writable_keys`, `server.py:400-406`). Unlike
-  `/api/llm/apply` which skips the mask (`server.py:1187`:
+- **Location:** `scripts/server_core.py:254-353` (`CONFIG_META`),
+  `server_core.py:877-890` (`api_config_set`), `server_core.py:59-66` (`save_cfg`)
+- `llm_api_key` is registered `editable: True` (`server_core.py:275`), so it is in
+  the derived allowlist (`_config_writable_keys`, `server_core.py:356-362`). Unlike
+  `/api/llm/apply` which skips the mask (`server_core.py:1072`:
   `if key and key != API_KEY_MASK`), `POST /api/config` accepts the masked
   value. A GET-then-POST script/MCP client (the natural "read config, tweak,
   save" pattern) therefore persists the literal `"••••••••"` as the API key
@@ -137,18 +137,18 @@ Line numbers refer to the repo as of commit `d559718`.
   non-editable there and route writes through `/api/llm/apply` only.
 
 #### 12. llama-server zombie lockout
-- **Location:** `scripts/server.py:1267-1290` (`api_llm_start`),
-  `server.py:1293-1309` (`api_llm_control`)
+- **Location:** `scripts/routes_llm.py:225-246` (`api_llm_start`),
+  `scripts/routes_llm.py:250-271` (`api_llm_control`)
 - Only `SELFHOST_PROC["pid"]` is kept; the `Popen` object is dropped, so the
   child is never reaped. `os.kill(pid, 0)` succeeds for zombies, so after the
   llama-server process exits, start/control keep reporting "already running"
   until the whole web server restarts. This is the exact bug already fixed
   for OCR/ingest by keeping the Popen and `poll()`-ing it (see the comments
-  at `server.py:68-70, 91-94`) — the llama path was never migrated.
+  at `server.py:74-76, server_core.py:47-50`) — the llama path was never migrated.
 - **Fix:** store the `Popen` and use `proc.poll()` for liveness.
 
 #### 13. `/api/chat` (non-stream) dies without a response on missing collection
-- **Location:** `scripts/server.py:2668-2689` (`run_rag_chat`)
+- **Location:** `scripts/server_core.py:1648-1669` (`run_rag_chat`)
 - `get_chat_collection(set_name)` is evaluated inside the agentic `try`, but
   `except Exception` does not catch the `SystemExit` from `setup_chroma`
   (`scripts/agent.py:105`), so it escapes `run_rag_chat` entirely instead of
@@ -167,7 +167,7 @@ Line numbers refer to the repo as of commit `d559718`.
 - **Fix:** anchor on count phrasing ("10 questions", "of 15", "quiz with 20").
 
 #### 15. Pending quiz-spec hijack on follow-up questions
-- **Location:** `scripts/server.py:2410-2462` (`_resolve_pending_spec_delta`)
+- **Location:** `scripts/routes_quiz.py:480-532` (`_resolve_pending_spec_delta`)
 - While a pending spec exists, **any** message matching
   `\b(build|generate|go ahead|make it now|yes|yep|confirm)\b` (line 2423)
   confirms-and-"builds" the quiz instead of answering the question —
@@ -208,7 +208,7 @@ Line numbers refer to the repo as of commit `d559718`.
   by `/api/course`); the surrounding unit titles/warnings are escaped.
 
 #### 19. OCR status 500 on malformed lock file
-- `scripts/server.py:688-730` — `_read_ocr_lock()` returns raw JSON and
+- `scripts/server_core.py:644-686` — `_read_ocr_lock()` returns raw JSON and
   `ocr_active()`/`read_ocr_status()` call `int(ext.get("pid"))` without a
   default; a partial/garbage `.ocr.lock` (missing `pid`) raises `TypeError` →
   500. The ingest path validates this (`ingest.read_ingest_lock` uses
@@ -216,7 +216,7 @@ Line numbers refer to the repo as of commit `d559718`.
   doesn't.
 
 #### 20. `api_quiz_answer` dead validation
-- `scripts/server.py:1987-1990` — `qid = str(data.get("qid"))` makes
+- `scripts/routes_quiz.py:172-175` — `qid = str(data.get("qid"))` makes
   `qid is None` unreachable; a missing qid becomes the string `"None"` and
   yields 404 "Question not found" instead of 400.
 
@@ -228,15 +228,15 @@ Line numbers refer to the repo as of commit `d559718`.
 - `scripts/ocr_compare.py:45-46` still bakes machine-specific tesseract
   paths (`/tmp/opencode/mamba/envs/tess/...`).
 - `lexical_backend` is now honored by catalog/MCP
-  (`scripts/catalog.py:364`, `scripts/mcp_server.py:263,725`) — part of U2
+  (`scripts/catalog.py:364`, `scripts/mcp_server_core.py:219, server_core.py:681`) — part of U2
   fixed — **but** the web-chat path never passes it:
-  `server.py:2596-2601` calls `agent.retrieve_rag(...)` without
+  `server_core.py:1576-1581` calls `agent.retrieve_rag(...)` without
   `backend=`, so the main chat pipeline always uses `"auto"`. The config
   knob is half-honored.
 
 #### 22. No cancellation of background workers on client disconnect
-- `scripts/server.py:1851-1886` (`_quiz_generate_sse`) and
-  `server.py:2875-2930` (map-reduce path): if the SSE client disconnects,
+- `scripts/server_core.py:1372-1427` (`_quiz_generate_sse`) and
+  `server_core.py:1855-1910` (map-reduce path): if the SSE client disconnects,
   the worker thread keeps running (LLM budget continues to burn; queue
   grows). The quiz build has no abort hook.
 
@@ -244,7 +244,7 @@ Line numbers refer to the repo as of commit `d559718`.
 
 ## B. Prior findings still live (from `plans/improvements.md`)
 
-- **S1** No auth on any route + open `CORS(app)` (`scripts/server.py:45`) —
+- **S1** No auth on any route + open `CORS(app)` (`scripts/server.py:51`) —
   deferred by decision (trusted-LAN only), unchanged.
 - **S3** Raw-id path joins with no whitelist: `chat_store._path`
   (`scripts/chat_store.py:20-21`) **and now also** `quiz_store._spec_path` /
@@ -252,25 +252,25 @@ Line numbers refer to the repo as of commit `d559718`.
   `/api/quiz/<quiz_id>`, `/api/quiz/spec/<spec_id>`. Only mitigated by
   Werkzeug's `string` converter rejecting `/`; no `^[0-9a-f]{12}$` check.
 - **S4** SSRF via user-controlled `llm_base_url`, key sent as
-  `Authorization` (`scripts/server.py:434-485, 1152-1174`).
+  `Authorization` (`scripts/server_core.py:390-441, scripts/server_core.py:1037-1059`).
 - **S5** No `MAX_CONTENT_LENGTH` anywhere; `int(data.get("top_k"))` raises
   `ValueError` → 500 on non-integer input
-  (`scripts/server.py:2773, 2831, 3080`).
+  (`scripts/server_core.py:1753, scripts/server_core.py:1811, scripts/server_core.py:1990`).
 - **S6** `/api/fs` lists any directory on the host
-  (`scripts/server.py:3447-3470`); `/api/embed/load` downloads arbitrary HF
-  models (`server.py:1081-1094`).
+  (`scripts/server_core.py:2246-2269`); `/api/embed/load` downloads arbitrary HF
+  models (`server_core.py:966-979`).
 - **P1** BM25 index built inline on first chat request, `_bm25_cache`
   unguarded (double-check locking missing) — concurrent first requests each
   rebuild; minutes of first-token latency
   (`scripts/agent.py:665-773`).
 - **P2** Single-shot path runs full retrieval inside the SSE generator
-  before the first byte (`scripts/server.py:2999`).
+  before the first byte (`scripts/routes_chat.py:72`).
 - **P3** Reranker scores all fused candidates, then trims to `top_n`
   (`scripts/agent.py:537-546` — `pairs` built from every hit before
   `predict`).
 - **P4** Fresh `chromadb.PersistentClient` per request, never closed
-  (`scripts/server.py:862-864` via `setup_chroma`, `server.py:3273`);
-  `_chat_lock` declared at `server.py:851` and **never used** → unguarded
+  (`scripts/server_core.py:818-820` via `setup_chroma`, `server_core.py:2183`);
+  `_chat_lock` declared at `server_core.py:807` and **never used** → unguarded
   lazy-init races for `_chat_client`/`_chat_embedder`/`_reranker` under
   `threaded=True`.
 - **P5** In-memory `_bm25_cache` is never invalidated after ingest; the
@@ -280,10 +280,10 @@ Line numbers refer to the repo as of commit `d559718`.
   `_match_titles` re-queries + rescans all titles every request
   (`scripts/agent.py:244-330`).
 - **R2** `_sse_wrap` has no error handling around the LLM stream
-  (`scripts/server.py:3207-3220`) — external OpenAI-compatible clients hang
+  (`scripts/server_core.py:2117-2130`) — external OpenAI-compatible clients hang
   with no `error`/`[DONE]` if the stream dies mid-response.
 - **R4** Non-atomic JSON writes remain for `config.json`
-  (`scripts/server.py:113-115` `_write_json`) and every `chat_store` write
+  (`scripts/server_core.py:69-71` `_write_json`) and every `chat_store` write
   (`scripts/chat_store.py:71,92,105,119,146,172`). (Partially fixed — see
   C.)
 - **R5** `merge_text_into_pdf` leaks the fitz `doc` on exception (close()
@@ -292,7 +292,7 @@ Line numbers refer to the repo as of commit `d559718`.
   locks.
 - **R6** `setup_chroma` still signals errors via `sys.exit(1)`
   (`scripts/agent.py:105`) — root enabler of A1/A2-equivalent bugs
-  (`server.py:1437`-style `except SystemExit` guards are everywhere, which
+  (`routes_llm.py:246`-style `except SystemExit` guards are everywhere, which
   is the fragility R6 predicted).
 
 ---
@@ -300,12 +300,12 @@ Line numbers refer to the repo as of commit `d559718`.
 ## C. Confirmed fixed since the Sep handoff
 
 - **S2** Secret plumbing: `SECRET_KEYS` + `config.local.json` split, masked
-  client values (`scripts/_paths.py:23`, `scripts/server.py:103-146`),
+  client values (`scripts/_paths.py:23`, `scripts/server_core.py:59-102`),
   `config.json` no longer carries a key — except the three leaks
   (A3 embed/apply, A4 MCP get_config, A11 mask round-trip).
 - **R1** Stale OCR/ingest lock liveness: `ocr_active()`/`read_ocr_status()`
   now validate PIDs and `_clean_stale_lock()` clears dead locks
-  (`scripts/server.py:696-730, 762-781`).
+  (`scripts/server_core.py:652-686, scripts/server_core.py:718-737`).
 - **R3** (attempted): retrieval moved inside the generator try-structure —
   but the fix introduced the KeyError in A2.
 - **Manifest set-awareness** (issues.md #3) and `agent.py` `rag_root()`
@@ -328,7 +328,7 @@ Line numbers refer to the repo as of commit `d559718`.
    `_stream_sse` agent worker and `run_rag_chat`, and read
    `payload["error"]` instead of `payload["answer"]`. (Or, properly, make
    `setup_chroma` raise a normal exception — old R6.)
-2. `server.py:1123` → `_public_cfg(cfg)`; MCP `get_config` filter
+2. `server_core.py:1008` → `_public_cfg(cfg)`; MCP `get_config` filter
    `SECRET_KEYS` (A3 + A4).
 3. Salt the OCR cache key with the rel path (A5).
 4. One-word fixes: `prompt_name="document"` → `"passage"` (A6); GIFT

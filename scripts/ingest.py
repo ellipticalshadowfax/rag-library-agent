@@ -6,6 +6,7 @@ import json
 import os
 import random
 import re
+import shutil
 import signal
 import sqlite3
 import subprocess
@@ -23,7 +24,7 @@ console = Console()
 
 from agent import tokenize
 
-from _paths import merge_local_config, ocr_cache_name, rag_root, resolve_device
+from _paths import load_config_file, ocr_cache_name, rag_root, resolve_device
 
 EXTENSIONS_TEXT = {".pdf", ".epub", ".mobi", ".djvu", ".txt", ".html", ".htm"}
 
@@ -86,12 +87,41 @@ def release_ingest_lock():
 # ─── Config ──────────────────────────────────────────────────────────────────
 
 def load_config():
-    cfg_path = rag_root() / "config.json"
-    with open(cfg_path) as f:
-        cfg = json.load(f)
-    return merge_local_config(cfg)
+    return load_config_file()
 
 # ─── Manifest DB ─────────────────────────────────────────────────────────────
+
+_DIGEST_CHUNK = 1 << 20  # 1 MiB: stream files, never load a whole PDF
+
+
+def content_digest(fpath) -> str | None:
+    """Streaming BLAKE2b digest of a file's bytes, or None if unreadable."""
+    h = hashlib.blake2b(digest_size=32)
+    try:
+        with open(fpath, "rb") as f:
+            for chunk in iter(lambda: f.read(_DIGEST_CHUNK), b""):
+                h.update(chunk)
+    except OSError:
+        return None
+    return h.hexdigest()
+
+
+def _digest_if_unchanged(fpath, mtime, size) -> str | None:
+    """Hash fpath only if it still has the (mtime, size) recorded for it.
+
+    The recorded stat is taken at scan time; embedding can run for minutes.
+    If the file was edited in between, hashing the new bytes under the old
+    stat would let is_current() accept content that was never embedded, so
+    store no hash (NULL) instead.
+    """
+    try:
+        st = os.stat(fpath)
+    except OSError:
+        return None
+    if st.st_mtime != mtime or st.st_size != size:
+        return None
+    return content_digest(fpath)
+
 
 class Manifest:
     def __init__(self, db_path: Path):
@@ -237,20 +267,51 @@ class Manifest:
             self.conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_parents_source ON parents(source)")
 
+        # Nullable content hash (see is_current). Rows written before this
+        # column existed keep NULL, which means "no hash": they fall back to the
+        # plain (mtime, size) check exactly as before.
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(files)")}
+        if "content_hash" not in cols:
+            self.conn.execute("ALTER TABLE files ADD COLUMN content_hash TEXT")
+
     def is_current(self, rel_path: str, mtime: float, size: int,
-                   set_name: str = "") -> bool:
+                   set_name: str = "", fpath=None) -> bool:
+        """True if the indexed copy of rel_path matches the file on disk.
+
+        Fast path: identical (mtime, size). Fallback, only when fpath is given
+        and the stored row has the same size and a content hash: hash the file
+        and, if it matches what was indexed, refresh the stored mtime so the
+        next run takes the fast path. A copy or restore that drops mtimes thus
+        does not force re-embedding an unchanged file.
+        """
         row = self.conn.execute(
-            "SELECT mtime, size FROM files WHERE rel_path = ? AND set_name = ?",
+            "SELECT mtime, size, content_hash FROM files WHERE rel_path = ? AND set_name = ?",
             (rel_path, set_name),
         ).fetchone()
-        return row and row["mtime"] == mtime and row["size"] == size
+        if not row:
+            return False
+        if row["mtime"] == mtime and row["size"] == size:
+            return True
+        if fpath is None or row["size"] != size or not row["content_hash"]:
+            return False
+        if content_digest(fpath) != row["content_hash"]:
+            return False
+        self.conn.execute(
+            "UPDATE files SET mtime = ? WHERE rel_path = ? AND set_name = ?",
+            (mtime, rel_path, set_name),
+        )
+        self.conn.commit()
+        return True
 
     def upsert(self, rel_path, abs_path, mtime, size, ocr_status="none",
-               kind="unknown", tags=None, title="", set_name=""):
+               kind="unknown", tags=None, title="", set_name="", content_hash=None):
+        # content_hash is always overwritten, including with NULL: a stale hash
+        # left behind after the file changed would let is_current() wrongly
+        # accept it.
         tags_json = json.dumps(tags or [])
         self.conn.execute("""
-            INSERT INTO files (rel_path, abs_path, mtime, size, ocr_status, kind, tags, title, set_name, indexed_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO files (rel_path, abs_path, mtime, size, ocr_status, kind, tags, title, set_name, indexed_at, content_hash)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(rel_path, set_name) DO UPDATE SET
                 abs_path=excluded.abs_path,
                 mtime=excluded.mtime,
@@ -260,8 +321,9 @@ class Manifest:
                 tags=excluded.tags,
                 title=excluded.title,
                 set_name=excluded.set_name,
-                indexed_at=excluded.indexed_at
-        """, (rel_path, abs_path, mtime, size, ocr_status, kind, tags_json, title, set_name, time.time()))
+                indexed_at=excluded.indexed_at,
+                content_hash=excluded.content_hash
+        """, (rel_path, abs_path, mtime, size, ocr_status, kind, tags_json, title, set_name, time.time(), content_hash))
         self.conn.commit()
 
     def remove(self, rel_path: str, set_name: str = ""):
@@ -495,14 +557,42 @@ def classify_kind(tags: list[str], fiction_tags: list[str]) -> str:
 
 # ─── OCR ─────────────────────────────────────────────────────────────────────
 
+_PDFTOTEXT = shutil.which("pdftotext")
+_warned_no_pdftotext = False
+
+
+def _pdf_text_chars_pymupdf(pdf_path: str, pages: int = 3) -> int:
+    """Count extractable characters in the first pages using PyMuPDF (fallback)."""
+    with fitz.open(pdf_path) as doc:
+        return sum(len(doc[i].get_text().strip())
+                   for i in range(min(pages, len(doc))))
+
+
 def needs_ocr(pdf_path: str, threshold: int = 50) -> bool:
+    """True when a PDF has (almost) no text layer in its first 3 pages.
+
+    Uses pdftotext when it is on PATH; otherwise falls back to PyMuPDF so a
+    machine without pdftotext does not flag every PDF as scanned. A file that
+    cannot be read at all is reported as needing OCR (OCR will surface the error).
+    """
+    global _warned_no_pdftotext
+    if _PDFTOTEXT is None and not _warned_no_pdftotext:
+        _warned_no_pdftotext = True
+        console.print("[yellow]pdftotext not found on PATH; scanned-PDF detection "
+                      "uses PyMuPDF instead (install poppler-utils for the "
+                      "original check).[/yellow]")
+    if _PDFTOTEXT is not None:
+        try:
+            result = subprocess.run(
+                [_PDFTOTEXT, "-l", "3", pdf_path, "-"],
+                capture_output=True, text=True, timeout=15
+            )
+            return len(result.stdout.strip()) < threshold
+        except (OSError, subprocess.TimeoutExpired):
+            pass  # binary vanished or hung: fall through to PyMuPDF
     try:
-        result = subprocess.run(
-            ["pdftotext", "-l", "3", pdf_path, "-"],
-            capture_output=True, text=True, timeout=15
-        )
-        return len(result.stdout.strip()) < threshold
-    except Exception:
+        return _pdf_text_chars_pymupdf(pdf_path) < threshold
+    except (RuntimeError, OSError):  # fitz.FileDataError is a RuntimeError
         return True
 
 
@@ -1147,7 +1237,7 @@ def ingest(target: str, set_name: str, cfg: dict, force: bool = False, only_path
             mtime = stat.st_mtime
             size = stat.st_size
 
-            if not force and manifest.is_current(rel, mtime, size, set_name):
+            if not force and manifest.is_current(rel, mtime, size, set_name, fpath=fpath):
                 continue
 
             # Get metadata
@@ -1170,7 +1260,8 @@ def ingest(target: str, set_name: str, cfg: dict, force: bool = False, only_path
             if ocr_status == "needs_ocr_skipped":
                 # OCR disabled and no text layer — mark as known-skipped
                 manifest.upsert(rel, str(fpath), mtime, size,
-                               "needs_ocr_skipped", kind, tags, title, set_name)
+                               "needs_ocr_skipped", kind, tags, title, set_name,
+                               content_hash=_digest_if_unchanged(fpath, mtime, size))
                 continue
 
             files_to_process.append({
@@ -1281,7 +1372,8 @@ def ingest(target: str, set_name: str, cfg: dict, force: bool = False, only_path
             if not text.strip():
                 print(f"[{idx}/{total}] SKIP (no text): {fpath.name}", flush=True)
                 manifest.upsert(rel, str(fpath), finfo["mtime"], finfo["size"],
-                               finfo["ocr_status"], finfo["kind"], finfo["tags"], finfo["title"], set_name)
+                               finfo["ocr_status"], finfo["kind"], finfo["tags"], finfo["title"], set_name,
+                               content_hash=_digest_if_unchanged(fpath, finfo["mtime"], finfo["size"]))
                 skipped += 1
                 continue
 
@@ -1407,8 +1499,11 @@ def ingest(target: str, set_name: str, cfg: dict, force: bool = False, only_path
                 manifest.write_parents(parent_rows)
 
             # Update manifest
+            # Hash the bytes as they are now (after any OCR merge), so the
+            # stored digest matches the post-merge file.
             manifest.upsert(rel, str(fpath), finfo["mtime"], finfo["size"],
-                           finfo["ocr_status"], finfo["kind"], finfo["tags"], finfo["title"], set_name)
+                           finfo["ocr_status"], finfo["kind"], finfo["tags"], finfo["title"], set_name,
+                           content_hash=_digest_if_unchanged(fpath, finfo["mtime"], finfo["size"]))
             processed += 1
 
         except Exception as e:

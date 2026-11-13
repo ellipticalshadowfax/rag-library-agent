@@ -57,6 +57,11 @@ anki = [
     "genanki>=0.13",
 ]
 
+# Test suite (tests/). Not needed at runtime: uv pip install -e ".[dev]".
+dev = [
+    "pytest>=8",
+]
+
 # GPU: CUDA torch + NVIDIA runtime libs.
 #
 # A pip extra cannot specify the PyTorch CUDA --extra-index-url, so the CUDA
@@ -72,3 +77,6 @@ gpu = []
 [tool.setuptools]
 packages = []
 py-modules = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -85,7 +85,7 @@ Missed or weak questions auto-enroll into a shared **review store** (`quizzes/re
 - Users rate cards **again/hard/good/easy**; the scheduler recomputes due-date + stability/difficulty on each rating. Rating history enables a **strength-over-time** chart.
 - The Review pane shows due-count, retention-rate, new-cards, and daily-stability buckets — all sourced from the single `review.json` file.
 
-### Session 6 — Course View & Conversational Negotiation (`scripts/server.py` + `web/index.html`)
+### Session 6 — Course View & Conversational Negotiation (`scripts/routes_quiz.py` + `scripts/server_core.py` + `web/index.html`)
 
 **Course pane**: Browses a work's syllabus with word counts and a `quizzed` flag drawn from stored quizzes. Also offers per-unit summaries via LLM map-reduce over that unit's sections.
 

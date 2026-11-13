@@ -202,6 +202,13 @@ Each chunk carries useful metadata, not just a vector:
 A separate SQLite file, `manifest.db`, tracks which files have been indexed and
 stores the **BM25 lexical index** (Part 4) and the parent texts.
 
+Change detection on re-ingest uses `(mtime, size)` first. When a file's mtime
+differs but its size matches and the manifest has a `content_hash` (a BLAKE2b
+digest written on each successful ingest), the file is hashed in 1 MiB chunks;
+if the digest matches, the stored mtime is refreshed and the file is skipped. So
+copying a library without preserving mtimes does not re-embed unchanged files.
+Rows from before the column existed have no hash and keep the plain check.
+
 ---
 
 ## Part 3 — Semantic search: answering your question
