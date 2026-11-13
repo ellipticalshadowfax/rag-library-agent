@@ -24,7 +24,7 @@ os.environ.setdefault("HF_HUB_OFFLINE", "1")  # Skip HuggingFace remote checks; 
 from flask import Flask, jsonify, request, send_from_directory, Response
 
 from _paths import (LOCAL_KEYS, SECRET_KEYS, atomic_write_json, cuda_available,
-                    rag_root, resolve_device)
+                    load_local_overrides, rag_root, resolve_device)
 import agent
 from agent import CollectionNotFound
 
@@ -131,8 +131,12 @@ def save_cfg(cfg):
     # Secrets (SECRET_KEYS, e.g. llm_api_key) and machine-specific keys
     # (LOCAL_ONLY_KEYS, e.g. sets) must never be written to the git-tracked
     # config.json; both go to the gitignored config.local.json instead.
-    public = {k: v for k, v in cfg.items() if k not in LOCAL_KEYS}
-    local = {k: v for k, v in cfg.items() if k in LOCAL_KEYS}
+    # Any other key that already lives in config.local.json (e.g. written by the
+    # MCP set_config tool) also stays there. Otherwise cfg, which is merged with
+    # config.local.json, would copy those values into config.json on every save.
+    local_keys = set(LOCAL_KEYS) | set(load_local_overrides())
+    public = {k: v for k, v in cfg.items() if k not in local_keys}
+    local = {k: v for k, v in cfg.items() if k in local_keys}
     _write_json(RAG_ROOT / "config.json", public)
     if local:
         _save_local_overrides(local)

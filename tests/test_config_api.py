@@ -74,3 +74,29 @@ def test_valid_sets_stored_in_local_file_only(client, test_root):
     assert r.status_code == 200
     assert json.loads(_read(test_root / "config.local.json"))["sets"] == sets
     assert "sets" not in json.loads(_read(test_root / "config.json"))
+
+
+def test_local_override_key_not_copied_into_tracked_config(client, test_root):
+    # The MCP set_config tool writes non-secret keys to config.local.json.
+    # A later UI save must not copy the merged value into config.json.
+    (test_root / "config.local.json").write_text(
+        json.dumps({"rerank_enabled": False}), encoding="utf-8")
+    r = client.post("/api/config", json={"chat_mode": "agentic"})
+    assert r.status_code == 200
+    tracked = json.loads(_read(test_root / "config.json"))
+    local = json.loads(_read(test_root / "config.local.json"))
+    assert "rerank_enabled" not in tracked
+    assert local["rerank_enabled"] is False
+    # The merged view still reflects the local override.
+    assert client.get("/api/config").get_json()["rerank_enabled"] is False
+
+
+def test_ui_edit_of_local_override_key_updates_local_file(client, test_root):
+    (test_root / "config.local.json").write_text(
+        json.dumps({"rerank_enabled": False}), encoding="utf-8")
+    r = client.post("/api/config", json={"rerank_enabled": True})
+    assert r.status_code == 200
+    local = json.loads(_read(test_root / "config.local.json"))
+    tracked = json.loads(_read(test_root / "config.json"))
+    assert local["rerank_enabled"] is True
+    assert "rerank_enabled" not in tracked
