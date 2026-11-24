@@ -411,3 +411,41 @@ on the extracted inline JS clean; targeted functional checks for `safe_id`,
 `atomic_write_json`, `ocr_cache_name`, store-path guards, `extract_count`,
 `_as_int`, `rerank_hits` capping and cache invalidation all pass. The offline
 eval harness was **not** run (no ingested index, as in §Verification above).
+
+---
+
+# Addendum — Retrieval / ingest / remote-backend review (2026-11-23)
+
+Static review of the ingest, recall and rerank path plus the new remote
+embedder/reranker (`embed_backend: ollama`, `rerank_backend: remote`). All items
+below are **FIXED** with tests (`tests/test_retrieval_pipeline.py`,
+`tests/test_remote_backends.py`, `tests/test_ingest_safety.py`). The offline eval
+was run on a throwaway 12-book fixture index (local e5, CPU): metrics identical
+before and after (saturated, so it only proves no regression).
+
+| # | Area | Bug | Fix |
+|---|---|---|---|
+| 1 | `agent.retrieve` | `kind` + `title` filters built a two-key `where`; Chroma rejects it, title mode silently dropped | combine with `$and` |
+| 2 | `_bm25_leg` | ignored `filter_kind` / `where_extra`, wrong-kind chunks leaked in | filter BM25 candidates |
+| 3 | RRF | BM25 list excluded dense-pool ids before ranking, so agreement was never rewarded | rank full BM25 list, fetch only missing docs |
+| 4 | `_bm25_leg` | stale BM25 ids became empty-document hits | skip ids absent from Chroma |
+| 5 | `retrieve_rag` | title mode skipped BM25 fusion and rerank | title mode now fuses (restricted to matched titles) and reranks |
+| 6 | `retrieve_rag` | hard `min(top_k, 8)` | `retrieval_top_k_max` config key (default 8) |
+| 7 | `OllamaRemoteEmbedder` | `prompt_name` ignored, no query/passage prefixes | per-model prefix table + `embed_query_prefix`/`embed_passage_prefix` overrides |
+| 8 | `ingest` | old chunks deleted before embedding; no record of which embedder built a collection | embed first, upsert, then drop stale tail; embedder identity stored in collection metadata and mismatch refused; `--rebuild` |
+| 9 | `build_embedder` | default dim 1024 vs config 384, never read from response | lazy dim probe |
+| 10 | cache keys | omitted endpoint URLs / prefixes | included |
+| 11 | MCP | built a local `CrossEncoder`, ignored `rerank_backend` | uses `build_reranker` |
+| 12 | remote backends | down host stalled every query for the full timeout | `rerank_timeout`, `embed_timeout`, `rerank_cooldown` circuit breaker, 5xx/connection retry |
+| 13 | `RemoteReranker` | missing indexes scored `0.0` (not a floor on logit scales) | fill with min-1.0; empty result raises |
+| 14 | `ingest` | `bm25_df` rebuilt after every file (quadratic) | once per run, in `finally` |
+| 15 | `ingest` | empty-text / no-chunk files left stale chunks or were reprocessed forever | purge and upsert manifest row |
+| 16 | `_build_bm25_index` | `BM25Okapi([])` crashed on an empty collection, never cached | cache an empty index |
+| 17 | `ingest` | torch thread setup ran for remote backends | local backend only |
+
+Notes: collections built before this change have no stored embedder identity and
+are adopted with a warning on the next ingest. Indexes built with the Ollama
+backend before the qwen3 query-prefix change should be rebuilt with `--rebuild`.
+Rerank scores are backend-scaled (ms-marco logits vs 0-1) and not comparable
+across backends; nothing thresholds on them. `catalog.py` still calls
+`_bm25_leg` without `filter_kind` (works; could push the filter down).

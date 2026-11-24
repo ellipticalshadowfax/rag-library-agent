@@ -90,3 +90,11 @@ The `cmd_collections` CLI helper is fixed too: it now builds its index path
 from the `rag_root()` accessor instead of `Path(__file__).resolve().parent.parent`,
 so `--collections` honors `RAG_ROOT`. (Previously tracked as `errorsandbugs.md`
 §A17; the `/sources` NameError from the same finding is also fixed.)
+
+## 6. Embedder change silently mixed or lost vectors — FIXED
+
+Ingest now stores the embedder identity (backend, model, dim, query/passage
+prefixes) in the collection metadata and refuses a mismatching ingest; use
+`ingest.py --rebuild --set <name>` to re-embed a set with a new embedder. A file's
+old chunks are only replaced after its new embeddings succeed. See the
+2026-11-23 addendum in `errorsandbugs.md`.

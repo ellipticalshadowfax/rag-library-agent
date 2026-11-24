@@ -58,7 +58,7 @@
       "path": "/path/to/your/library",
       "kind": "local"
     },
-    "nlp_books": {
+    "reference_books": {
       "path": "/path/to/nlp/books",
       "kind": "local"
     }

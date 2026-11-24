@@ -5,7 +5,7 @@
   "num_retrieval": 19,
   "num_topic": 6,
   "sets": [
-    "nlp_books",
+    "reference_books",
     "library"
   ],
   "metrics": {
@@ -465,7 +465,7 @@
     {
       "query": "How can body language and gestures reveal what someone is thinking?",
       "expected_title": "Allan Peas - Body Language How To Read Others Thoughts By Their Gestures",
-      "set": "nlp_books",
+      "set": "reference_books",
       "filter_kind": null,
       "mode": "retrieval",
       "metrics": {
@@ -1634,7 +1634,7 @@
     {
       "query": "reading body language and gestures to know what someone thinks",
       "expected_title": "Allan Peas - Body Language How To Read Others Thoughts By Their Gestures",
-      "set": "nlp_books",
+      "set": "reference_books",
       "filter_kind": null,
       "mode": "topic",
       "expected_works": [
@@ -1747,7 +1747,7 @@
     {
       "query": "critical thinking and avoiding fallacies",
       "expected_title": "Browne,Keeley - Asking the Right Questions, A Guide to Critical Thinking, 8th Ed",
-      "set": "nlp_books",
+      "set": "reference_books",
       "filter_kind": null,
       "mode": "topic",
       "expected_works": [
