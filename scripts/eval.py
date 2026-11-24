@@ -68,13 +68,14 @@ def _get_reranker(cfg):
     model = cfg.get("rerank_model")
     if not model or model in _rerank_unavailable:
         return None
-    if _reranker["model"] != model or _reranker["obj"] is None:
+    backend = (cfg.get("rerank_backend") or "local").strip().lower()
+    cache_key = f"{backend}:{model}:{cfg.get('rerank_api_url')}"
+    if _reranker["model"] != cache_key or _reranker["obj"] is None:
         try:
-            from sentence_transformers import CrossEncoder
-            print(f"[eval] loading reranker: {model}...")
-            _reranker["obj"] = CrossEncoder(
-                model, device=resolve_device(cfg.get("embed_device")))
-            _reranker["model"] = model
+            from _paths import build_reranker
+            print(f"[eval] loading reranker: {model} (backend={backend})...")
+            _reranker["obj"] = build_reranker(cfg)
+            _reranker["model"] = cache_key
         except Exception as e:
             print(f"[eval] reranker unavailable, skipping rerank: {e}")
             _rerank_unavailable.add(model)

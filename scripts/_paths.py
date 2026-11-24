@@ -17,6 +17,7 @@ import json
 import os
 import re
 import tempfile
+import time
 from pathlib import Path
 
 _CODE_ROOT = Path(__file__).resolve().parent.parent
@@ -190,6 +191,264 @@ _DEVICE_ALIASES = {
     "mps": "mps",      # Apple Silicon (unused by the UI; kept for manual config)
     "gpu": "cuda",     # UI shorthand for 'GPU (CUDA)'
 }
+
+
+#: Per-model query/passage prefixes: lowercase substring of the model name ->
+#: (query_prefix, passage_prefix). First match wins. Overridable per install via
+#: config ``embed_query_prefix`` / ``embed_passage_prefix``.
+EMBED_PREFIX_TABLE = [
+    ("e5", ("query: ", "passage: ")),
+    ("qwen3-embedding", (
+        "Instruct: Given a web search query, retrieve relevant passages "
+        "that answer the query\nQuery: ", "")),
+]
+
+
+def resolve_embed_prefixes(cfg, model):
+    """Return ``(query_prefix, passage_prefix)`` for ``model``.
+
+    Config keys ``embed_query_prefix`` / ``embed_passage_prefix`` win when
+    present and not None (an explicit ``""`` means "no prefix"); otherwise the
+    model-name table applies, and unknown models get ``""``.
+    """
+    name = (model or "").lower()
+    tq, tp = "", ""
+    for needle, (q, p) in EMBED_PREFIX_TABLE:
+        if needle in name:
+            tq, tp = q, p
+            break
+    q = cfg.get("embed_query_prefix")
+    p = cfg.get("embed_passage_prefix")
+    return (tq if q is None else str(q)), (tp if p is None else str(p))
+
+
+def embedder_identity(cfg, model=None):
+    """Identity of the configured embedder, for collection metadata / mismatch
+    checks: ``{backend, model, dim, query_prefix, passage_prefix}``.
+
+    Pass the live ``model`` to use its real values (remote embedders report the
+    probed dim; sentence-transformers models report their ``prompts``). Without
+    it, dim comes from ``cfg['embed_dim']`` and prefixes from config/table.
+    """
+    ident = getattr(model, "identity", None)
+    if isinstance(ident, dict):
+        return dict(ident)
+    backend = (cfg.get("embed_backend") or "local").strip().lower()
+    name = cfg.get("embed_model", "intfloat/multilingual-e5-small")
+    q, p = resolve_embed_prefixes(cfg, name)
+    prompts = getattr(model, "prompts", None)
+    if isinstance(prompts, dict):
+        q = prompts.get("query", q)
+        p = prompts.get("passage", p)
+    dim = cfg.get("embed_dim")
+    try:
+        dim = int(dim) if dim is not None else None
+    except (TypeError, ValueError):
+        dim = None
+    return {"backend": backend, "model": name, "dim": dim,
+            "query_prefix": q, "passage_prefix": p}
+
+
+def _default_sleep(seconds):
+    time.sleep(seconds)
+
+
+def _default_clock():
+    return time.monotonic()
+
+
+class OllamaRemoteEmbedder:
+    """Drop-in stand-in for a sentence-transformers model that calls a remote
+    Ollama ``/api/embed`` endpoint instead of loading weights in-process.
+
+    Selected via config ``embed_backend: "ollama"``. Lets a heavy/bulk index
+    build run against a GPU box's Ollama service while query-time code paths
+    keep calling the same ``.encode()`` interface unchanged.
+
+    ``encode(prompt_name="query"|"passage")`` prepends the matching prefix;
+    any other prompt_name is sent unprefixed. Transient failures
+    (ConnectionError/Timeout/HTTP 5xx) are retried twice with 0.5s/1s backoff;
+    4xx is never retried. ``sleep`` is injectable for tests.
+    """
+
+    RETRY_BACKOFF = (0.5, 1.0)
+
+    def __init__(self, base_url: str, model: str, dim: int = 1024, timeout: int = 180,
+                 query_prefix: str = "", passage_prefix: str = "", sleep=None):
+        self.base_url = base_url.rstrip("/")
+        self.model = model
+        self._dim = dim
+        self._probed_dim = None
+        self.timeout = timeout
+        self.query_prefix = query_prefix
+        self.passage_prefix = passage_prefix
+        self._sleep = sleep
+        # Real prefixes, so callers' ``"query" not in model.prompts`` guards
+        # do not overwrite them.
+        self.prompts = {"query": query_prefix, "passage": passage_prefix}
+
+    def get_sentence_embedding_dimension(self):
+        """Real dim, probed lazily with a tiny encode and cached; falls back to
+        the configured dim if the endpoint is unreachable (not cached)."""
+        if self._probed_dim is None:
+            try:
+                vec = self.encode("dimension probe")
+                self._probed_dim = int(len(vec))
+            except Exception:
+                return self._dim
+        return self._probed_dim
+
+    def get_embedding_dimension(self):  # newer sentence-transformers alias
+        return self.get_sentence_embedding_dimension()
+
+    @property
+    def identity(self):
+        return {"backend": "ollama", "model": self.model,
+                "dim": self.get_sentence_embedding_dimension(),
+                "query_prefix": self.query_prefix,
+                "passage_prefix": self.passage_prefix}
+
+    def _post(self, batch):
+        import requests
+
+        delays = list(self.RETRY_BACKOFF)
+        while True:
+            try:
+                resp = requests.post(
+                    f"{self.base_url}/api/embed",
+                    json={"model": self.model, "input": batch},
+                    timeout=self.timeout,
+                )
+                resp.raise_for_status()
+                return resp.json()
+            except (requests.ConnectionError, requests.Timeout, requests.HTTPError) as e:
+                status = getattr(getattr(e, "response", None), "status_code", None)
+                transient = (not isinstance(e, requests.HTTPError)) or (
+                    status is not None and status >= 500)
+                if not transient or not delays:
+                    raise
+                (self._sleep or _default_sleep)(delays.pop(0))
+
+    def encode(self, texts, convert_to_numpy=True, batch_size=64,
+               show_progress_bar=False, prompt_name=None, **kwargs):
+        import numpy as np
+
+        prefix = {"query": self.query_prefix,
+                  "passage": self.passage_prefix}.get(prompt_name, "")
+        single = isinstance(texts, str)
+        items = [texts] if single else list(texts)
+        if prefix:
+            items = [prefix + t for t in items]
+        out = []
+        for i in range(0, len(items), max(1, batch_size)):
+            data = self._post(items[i:i + batch_size])
+            out.extend(data["embeddings"])
+        arr = np.array(out, dtype="float32")
+        return arr[0] if single else arr
+
+
+def build_embedder(cfg):
+    """Factory for the embedding model: local sentence-transformers (default)
+    or a remote Ollama backend when ``cfg['embed_backend'] == "ollama"``.
+
+    Centralizing this means ingest.py / agent.py / eval.py / server_core.py
+    all pick up the remote path by switching one config key.
+    """
+    backend = (cfg.get("embed_backend") or "local").strip().lower()
+    if backend == "ollama":
+        base_url = cfg.get("embed_api_url", "http://192.168.88.129:11434")
+        model = cfg.get("embed_model", "qwen3-embedding:0.6b")
+        dim = int(cfg.get("embed_dim", 1024))
+        qp, pp = resolve_embed_prefixes(cfg, model)
+        return OllamaRemoteEmbedder(
+            base_url, model, dim=dim,
+            timeout=int(cfg.get("embed_timeout", 180)),
+            query_prefix=qp, passage_prefix=pp)
+
+    import torch
+    from sentence_transformers import SentenceTransformer
+    model_name = cfg.get("embed_model", "intfloat/multilingual-e5-small")
+    dev = resolve_device(cfg.get("embed_device"))
+    torch.set_num_threads(os.cpu_count() or 8)
+    model = SentenceTransformer(model_name, device=dev)
+    return model
+
+
+class RemoteReranker:
+    """Drop-in stand-in for sentence-transformers' CrossEncoder that calls a
+    remote llama-server ``--reranking`` endpoint (``/v1/rerank``).
+
+    Ollama has no rerank endpoint (ollama/ollama#3368, long-standing); a
+    separate llama-server process is the legitimate way to serve a
+    cross-encoder's real classification-head score remotely instead of the
+    embedding-magnitude workaround some projects use. Selected via config
+    ``rerank_backend: "remote"``.
+
+    Scores are backend-scaled (raw logits vs. 0-1 probabilities) and are NOT
+    comparable across backends or models; never threshold on them.
+
+    Circuit breaker: after a failed call, ``predict`` raises immediately for
+    ``cooldown`` seconds instead of touching the network; a success resets it.
+    ``clock`` is injectable for tests.
+    """
+
+    def __init__(self, base_url: str, model: str = "reranker", timeout: int = 15,
+                 cooldown: float = 30, clock=None):
+        self.base_url = base_url.rstrip("/")
+        self.model = model
+        self.timeout = timeout
+        self.cooldown = cooldown
+        self._clock = clock
+        self._open_until = None
+
+    def _now(self):
+        return (self._clock or _default_clock)()
+
+    def predict(self, pairs, **kwargs):
+        import requests
+
+        if not pairs:
+            return []
+        if self._open_until is not None and self._now() < self._open_until:
+            raise RuntimeError("remote reranker unavailable (circuit open)")
+        query = pairs[0][0]
+        docs = [p[1] for p in pairs]
+        try:
+            resp = requests.post(
+                f"{self.base_url}/v1/rerank",
+                json={"model": self.model, "query": query, "documents": docs,
+                      "top_n": len(docs)},
+                timeout=self.timeout,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception:
+            self._open_until = self._now() + self.cooldown
+            raise
+        self._open_until = None
+        results = data.get("results") or []
+        if not results:
+            raise ValueError("remote reranker returned no results")
+        returned = {r["index"]: r["relevance_score"] for r in results}
+        floor = min(returned.values()) - 1.0
+        return [returned.get(i, floor) for i in range(len(docs))]
+
+
+def build_reranker(cfg):
+    """Factory for the reranker: local sentence-transformers CrossEncoder
+    (default) or a remote llama-server backend when
+    ``cfg['rerank_backend'] == "remote"``."""
+    backend = (cfg.get("rerank_backend") or "local").strip().lower()
+    if backend == "remote":
+        base_url = cfg.get("rerank_api_url", "http://192.168.88.129:11435")
+        model = cfg.get("rerank_model", "qwen3-reranker")
+        return RemoteReranker(
+            base_url, model,
+            timeout=cfg.get("rerank_timeout", 15),
+            cooldown=cfg.get("rerank_cooldown", 30))
+    from sentence_transformers import CrossEncoder
+    model = cfg.get("rerank_model", "cross-encoder/ms-marco-MiniLM-L-6-v2")
+    return CrossEncoder(model, device=resolve_device(cfg.get("embed_device")))
 
 
 def resolve_device(preferred=None):

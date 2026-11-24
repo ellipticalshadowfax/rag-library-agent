@@ -36,16 +36,17 @@ def setup_embedder(cfg: dict):
     # Auto-resolve device unless an explicit override is set in config. Calling
     # resolve_device here (at run time, not import time) lets us honour a config
     # toggle without extra flags.
-    from _paths import resolve_device
+    from _paths import resolve_device, build_embedder
     edev = resolve_device(cfg.get("embed_device"))
-    model_key = f"{em}:{edev}"
+    backend = (cfg.get("embed_backend") or "local").strip().lower()
+    model_key = (f"{backend}:{em}:{edev}:{cfg.get('embed_api_url')}:"
+                 f"{cfg.get('embed_query_prefix')!r}:{cfg.get('embed_passage_prefix')!r}")
     if _EMBEDDER_CACHE is not None and _EMBEDDER_CACHE.get("_key") == model_key:
         return _EMBEDDER_CACHE["_model"]
-    import torch
-    from sentence_transformers import SentenceTransformer
-    console.print(f"[dim]Loading embedder: {em}...[/dim]")
-    torch.set_num_threads(os.cpu_count() or 8)
-    model = SentenceTransformer(em, device=edev)
+    console.print(f"[dim]Loading embedder: {em} (backend={backend})...[/dim]")
+    full_cfg = dict(cfg)
+    full_cfg.setdefault("embed_model", em)
+    model = build_embedder(full_cfg)
     if hasattr(model, "prompts") and "query" not in model.prompts:
         model.prompts.update({"passage": "passage: ", "query": "query: "})
     console.print("[dim]Ready.[/dim]")
@@ -163,6 +164,25 @@ def diversify_hits(hits: list, limit: int | None = None,
     return kept
 
 
+def _build_where(filter_kind: str = None, where_extra: dict | None = None):
+    """Combine metadata filters into a Chroma ``where`` clause.
+
+    Chroma 1.x rejects a multi-key dict ("Expected where to have exactly one
+    operator"), so multiple filters are merged under ``$and``; a single filter
+    is passed through unwrapped.
+    """
+    filters = []
+    if filter_kind:
+        filters.append({"kind": filter_kind})
+    if where_extra:
+        filters.append(dict(where_extra))
+    if not filters:
+        return None
+    if len(filters) == 1:
+        return filters[0]
+    return {"$and": filters}
+
+
 def retrieve(query: str, embedder, collection, top_k: int = 10,
              filter_kind: str = None, cfg: dict = None, where_extra: dict | None = None):
     """Embed query and retrieve from ChromaDB.
@@ -172,16 +192,12 @@ def retrieve(query: str, embedder, collection, top_k: int = 10,
     """
     query_emb = embedder.encode([query], prompt_name="query")[0].tolist()
 
-    where = {}
-    if filter_kind:
-        where["kind"] = filter_kind
-    if where_extra:
-        where.update(where_extra)
+    where = _build_where(filter_kind, where_extra)
 
     results = collection.query(
         query_embeddings=[query_emb],
         n_results=top_k,
-        where=where if where else None,
+        where=where,
         include=["documents", "metadatas", "distances"],
     )
 
@@ -829,6 +845,12 @@ def _build_bm25_index(set_name, collection, backend, cf):
             if len(batch_ids) < batch:
                 break
         from rank_bm25 import BM25Okapi
+        if not tokdocs:
+            # BM25Okapi([]) raises ZeroDivisionError; cache the empty index so
+            # it is not rebuilt on every query.
+            print(f"[chat] BM25 index empty for '{set_name}'.", flush=True)
+            _bm25_cache[set_name] = {"bm25": None, "ids": [], "df": {}}
+            return _bm25_cache[set_name]
         bm25 = BM25Okapi(tokdocs)
         print(f"[chat] BM25 index ready ({len(ids)} docs).", flush=True)
         _bm25_cache[set_name] = {"bm25": bm25, "ids": ids, "df": df}
@@ -864,32 +886,47 @@ def _persist_bm25(ids, tokdocs, set_name) -> None:
         print(f"[chat] BM25 persist failed (non-fatal): {e}", flush=True)
 
 
-def _bm25_leg(set_name, query, skip_ids, collection, n=None, backend="auto", cfg: dict | None = None):
-    """Return hits for the top-n BM25 results not already in the dense pool."""
+def _bm25_leg(set_name, query, skip_ids, collection, n=None, backend="auto",
+              cfg: dict | None = None, filter_kind: str = None,
+              where_extra: dict | None = None):
+    """Return the top-n BM25 hits, ranked in full for RRF fusion.
+
+    Ids already in the dense pool (``skip_ids``) stay in the ranked list so a
+    document ranked highly by both legs is rewarded by fusion; they carry only
+    id + bm25_score (the dense side supplies document/metadata). Ids missing
+    from the collection (stale postings) are dropped.
+    """
     cf = cfg or {}
     if n is None:
         n = int(cf.get("bm25_top_n", BM25_TOP_N) or BM25_TOP_N)
     idx = _get_bm25_index(set_name, collection, backend=backend, cfg=cf)
+    if idx.get("bm25") is None:
+        return []
     toks = tokenize(query)
     if not toks:
         return []
     scores = idx["bm25"].get_scores(toks)
     top = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:n]
 
-    missing = [idx["ids"][i] for i in top if idx["ids"][i] not in skip_ids]
+    extra = [idx["ids"][i] for i in top if idx["ids"][i] not in skip_ids]
     meta_by_id, doc_by_id = {}, {}
-    if missing:
-        res = collection.get(ids=missing, include=["documents", "metadatas"])
-        for cid, m in zip(res.get("ids") or [], res.get("metadatas") or []):
-            meta_by_id[cid] = m
-        for cid, d in zip(res.get("ids") or [], res.get("documents") or []):
+    if extra:
+        res = collection.get(ids=extra, where=_build_where(filter_kind, where_extra),
+                             include=["documents", "metadatas"])
+        got_ids = res.get("ids") or []
+        for cid, d, m in zip(got_ids, res.get("documents") or [],
+                             res.get("metadatas") or []):
             doc_by_id[cid] = d
+            meta_by_id[cid] = m
 
     hits = []
     for i in top:
         cid = idx["ids"][i]
         if cid in skip_ids:
-            continue
+            doc_by_id[cid] = ""
+            meta_by_id[cid] = {}
+        elif cid not in meta_by_id:
+            continue  # stale posting: id no longer in the collection
         hits.append({
             "id": cid,
             "document": doc_by_id.get(cid, ""),
@@ -1024,7 +1061,7 @@ def retrieve_rag(set_name, query, top_k, filter_kind, cfg,
     # diversify down to top_k (or fewer). Raising top_k (config retrieval_top_k)
     # widens coverage; lowering it tightens the prompt. The pool cap protects
     # latency since every extra candidate costs a rerank call.
-    top_k = min(top_k, 8)
+    top_k = min(top_k, int(cfg.get("retrieval_top_k_max", 8) or 8))
     dense_mult = int(cfg.get("dense_pool_multiplier", 3) or 3)
     pool_k = min(top_k * dense_mult, 30)
 
@@ -1047,6 +1084,7 @@ def retrieve_rag(set_name, query, top_k, filter_kind, cfg,
             hits = []
         if not hits:
             title_mode = False
+            where_title = None
     else:
         hits = []
 
@@ -1065,24 +1103,28 @@ def retrieve_rag(set_name, query, top_k, filter_kind, cfg,
             hits = retrieve(query, embedder, collection, top_k=pool_k,
                             filter_kind=filter_kind, cfg=cfg)
 
-        # Lexical leg: BM25 hybrid + RRF fusion over (dense pool, BM25 top-ups).
-        try:
-            bm25_hits = _bm25_leg(set_name, query, {h["id"] for h in hits}, collection, backend=backend, cfg=cfg)
-        except Exception as e:
-            print(f"[chat] bm25 leg failed: {e}")
-            bm25_hits = []
-        if bm25_hits:
-            rrf_k = int(cfg.get("fuse_rrf_k", FUSE_RRF_K) or FUSE_RRF_K)
-            floor = int(cfg.get("fused_pool_floor", 40) or 40)
-            dense = sorted(hits, key=lambda h: h.get("distance")
-                           if h.get("distance") is not None else 2.0)
-            bm = sorted(bm25_hits, key=lambda h: h["bm25_score"], reverse=True)
-            hits = _rrf_fuse(dense, bm, k=rrf_k)[:max(pool_k, floor)]
+    # Lexical leg: BM25 hybrid + RRF fusion over (dense pool, BM25 top-ups).
+    # In title mode the same fused, reranked pipeline runs, with both legs
+    # confined to the matched titles.
+    try:
+        bm25_hits = _bm25_leg(set_name, query, {h["id"] for h in hits}, collection,
+                              backend=backend, cfg=cfg,
+                              filter_kind=filter_kind, where_extra=where_title)
+    except Exception as e:
+        print(f"[chat] bm25 leg failed: {e}")
+        bm25_hits = []
+    if bm25_hits:
+        rrf_k = int(cfg.get("fuse_rrf_k", FUSE_RRF_K) or FUSE_RRF_K)
+        floor = int(cfg.get("fused_pool_floor", 40) or 40)
+        dense = sorted(hits, key=lambda h: h.get("distance")
+                       if h.get("distance") is not None else 2.0)
+        bm = sorted(bm25_hits, key=lambda h: h["bm25_score"], reverse=True)
+        hits = _rrf_fuse(dense, bm, k=rrf_k)[:max(pool_k, floor)]
 
-        # Cross-encoder rerank of fused candidates.
-        if reranker is not None:
-            rtop = int(cfg.get("rerank_top_n", 24) or 24)
-            hits, _ = rerank_hits(hits, query, reranker, top_n=rtop)
+    # Cross-encoder rerank of fused candidates.
+    if reranker is not None:
+        rtop = int(cfg.get("rerank_top_n", 24) or 24)
+        hits, _ = rerank_hits(hits, query, reranker, top_n=rtop)
 
     # Parent-child retrieval: map the retrieved children to their section
     # parents (search unit = child, generation unit = parent). Only active
@@ -1105,8 +1147,9 @@ def retrieve_rag(set_name, query, top_k, filter_kind, cfg,
     common_terms = set()
     try:
         idx = _get_bm25_index(set_name, collection, backend=backend, cfg=cfg)
-        n = max(idx["bm25"].corpus_size, 1)
-        common_terms = {t for t, f in idx["df"].items() if f / n >= 0.01}
+        if idx.get("bm25") is not None:
+            n = max(idx["bm25"].corpus_size, 1)
+            common_terms = {t for t, f in idx["df"].items() if f / n >= 0.01}
     except Exception as e:
         print(f"[chat] common-terms build failed: {e}")
     low_rel, low_reason = detect_low_relevance(query, hits, cfg, common_terms=common_terms)

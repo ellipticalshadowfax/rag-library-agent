@@ -32,6 +32,7 @@
   "quiz_default_count": 10,
   "quiz_output_format": "markdown",
   "retrieval_top_k": 10,
+  "retrieval_top_k_max": 8,
   "relevance_threshold": 0.8,
   "max_retrieval_hops": 2,
   "retrieval_hops_driver": "llm",

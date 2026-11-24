@@ -106,15 +106,13 @@ def _reranker():
     key = "reranker"
     if key not in _resources:
         cfg = _load_agent().load_config()
-        if not cfg.get("rerank_enabled", True):
+        if not cfg.get("rerank_enabled", True) or not cfg.get("rerank_model"):
             _resources[key] = None
         else:
             try:
-                from sentence_transformers import CrossEncoder
-                model = cfg.get("rerank_model")
+                from _paths import build_reranker
                 with _muted_stdout():
-                    _resources[key] = CrossEncoder(
-                        model, device=resolve_device(cfg.get("embed_device")))
+                    _resources[key] = build_reranker(cfg)
             except Exception as e:
                 print(f"[mcp] reranker unavailable: {e}")
                 _resources[key] = None

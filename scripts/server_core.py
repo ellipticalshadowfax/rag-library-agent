@@ -186,7 +186,7 @@ def default_cfg():
     #   chunk_tokens / chunk_overlap  — indexing granularity; smaller = finer
     #                                   retrieval, more chunks to embed.
     #   parent_tokens                 — section size for parent_child generation.
-    #   retrieval_top_k               — chunks surfaced in the prompt (capped 8).
+    #   retrieval_top_k               — chunks surfaced in the prompt (capped by retrieval_top_k_max).
     #   relevance_threshold           — low-relevance guard score floor.
     #   max_retrieval_hops            — extra LLM-driven search rounds.
     #   llm_temperature / llm_max_tokens — generation creativity & length caps.
@@ -195,6 +195,17 @@ def default_cfg():
         "embed_model": "intfloat/multilingual-e5-small",
         "embed_device": "auto",
         "embed_dim": 384,
+        # Remote embedder/reranker backends (see _paths.build_embedder/build_reranker).
+        # Prefix None -> per-model table in _paths; "" -> explicitly no prefix.
+        "embed_backend": "local",
+        "embed_api_url": "http://192.168.88.129:11434",
+        "embed_query_prefix": None,
+        "embed_passage_prefix": None,
+        "embed_timeout": 180,
+        "rerank_backend": "local",
+        "rerank_api_url": "http://192.168.88.129:11435",
+        "rerank_timeout": 15,
+        "rerank_cooldown": 30,
         "chunk_tokens": 330,
         "chunk_overlap": 60,
         "chunking_strategy": "flat",
@@ -260,6 +271,7 @@ def default_cfg():
         "fsrs_enabled": True,
         "quiz_review_limit": 50,
         "retrieval_top_k": 10,
+        "retrieval_top_k_max": 8,
         "relevance_threshold": 0.80,
         "max_retrieval_hops": 2,
         "retrieval_hops_driver": "llm",
@@ -398,7 +410,8 @@ CONFIG_META = {
     "quiz_review_limit": {"label": "Review queue limit", "group": "Quiz", "min": 1, "max": 500, "advanced": True, "editable": True, "description": "Max due review cards returned by the review queue in one request."},
 
     # Retrieval
-    "retrieval_top_k":   {"label": "Retrieval top-k", "group": "Retrieval", "min": 1, "max": 50, "advanced": False, "editable": True, "description": "Chunks surfaced in the prompt (capped 8)."},
+    "retrieval_top_k":   {"label": "Retrieval top-k", "group": "Retrieval", "min": 1, "max": 50, "advanced": False, "editable": True, "description": "Chunks surfaced in the prompt (capped by retrieval_top_k_max)."},
+    "retrieval_top_k_max": {"label": "Retrieval top-k cap", "group": "Retrieval", "min": 1, "max": 50, "advanced": True, "editable": True, "description": "Hard cap applied to retrieval_top_k (default 8)."},
     "relevance_threshold": {"label": "Relevance threshold", "group": "Retrieval", "min": 0, "max": 1, "advanced": False, "editable": True, "description": "Low-relevance guard score floor."},
     "max_retrieval_hops": {"label": "Retrieval hops", "group": "Retrieval", "min": 1, "max": 6, "advanced": False, "editable": True, "description": "Extra LLM-driven search rounds."},
     "retrieval_hops_driver": {"label": "Retrieval hops driver", "group": "Retrieval", "advanced": False, "editable": True, "description": "How multi-hop retrieval is driven (llm)."},
@@ -406,6 +419,15 @@ CONFIG_META = {
     # Rerank / hybrid (advanced, not in Setup UI)
     "rerank_model":      {"label": "Reranker model", "group": "Advanced", "advanced": True, "editable": True, "description": "Cross-encoder model id used for re-scoring."},
     "rerank_enabled":    {"label": "Rerank enabled", "group": "Advanced", "advanced": True, "editable": True, "description": "Enable cross-encoder reranking."},
+    "embed_backend": {"label": "Embed backend", "group": "Advanced", "advanced": True, "editable": True, "description": "local (sentence-transformers) | ollama (remote /api/embed)."},
+    "embed_api_url": {"label": "Embed API URL", "group": "Advanced", "advanced": True, "editable": True, "description": "Base URL of the remote Ollama server (embed_backend=ollama)."},
+    "embed_query_prefix": {"label": "Embed query prefix", "group": "Advanced", "advanced": True, "editable": True, "description": "Override query prefix; unset = per-model default, empty = none."},
+    "embed_passage_prefix": {"label": "Embed passage prefix", "group": "Advanced", "advanced": True, "editable": True, "description": "Override passage prefix; unset = per-model default, empty = none."},
+    "embed_timeout": {"label": "Embed timeout", "group": "Advanced", "min": 1, "max": 3600, "advanced": True, "editable": True, "description": "Remote embed request timeout in seconds (default 180)."},
+    "rerank_backend": {"label": "Rerank backend", "group": "Advanced", "advanced": True, "editable": True, "description": "local (CrossEncoder) | remote (llama-server /v1/rerank)."},
+    "rerank_api_url": {"label": "Rerank API URL", "group": "Advanced", "advanced": True, "editable": True, "description": "Base URL of the remote llama-server (rerank_backend=remote)."},
+    "rerank_timeout": {"label": "Rerank timeout", "group": "Advanced", "min": 1, "max": 600, "advanced": True, "editable": True, "description": "Remote rerank request timeout in seconds (default 15)."},
+    "rerank_cooldown": {"label": "Rerank cooldown", "group": "Advanced", "min": 0, "max": 3600, "advanced": True, "editable": True, "description": "Seconds to skip a failed remote reranker before retrying (default 30)."},
     "fuse_rrf_k":        {"label": "Fuse RRF k", "group": "Advanced", "min": 1, "max": 200, "advanced": True, "editable": True, "description": "RRF rank-fusion constant k (default 60)."},
     "bm25_top_n":        {"label": "BM25 top n", "group": "Advanced", "min": 1, "max": 500, "advanced": True, "editable": True, "description": "BM25 hits to take as the lexical leg (default 30)."},
     "bm25_batch":        {"label": "BM25 batch", "group": "Advanced", "min": 100, "max": 100000, "advanced": True, "editable": True, "description": "Rows per Chroma pagination when building BM25 (default 20000)."},
@@ -938,7 +960,8 @@ _reranker = {"model": None, "obj": None}
 
 
 def get_chat_reranker():
-    """Lazy-loaded cross-encoder reranker (None if disabled/config missing).
+    """Lazy-loaded reranker: local CrossEncoder, or a remote llama-server
+    backend when ``rerank_backend == "remote"`` (None if disabled/missing).
 
     Guarded by ``_chat_lock`` so concurrent first requests load the (large)
     model once instead of racing.
@@ -947,18 +970,19 @@ def get_chat_reranker():
     model = cfg.get("rerank_model")
     if not cfg.get("rerank_enabled", True) or not model:
         return None
-    if _reranker["model"] != model:
+    backend = (cfg.get("rerank_backend") or "local").strip().lower()
+    cache_key = f"{backend}:{model}:{cfg.get('rerank_api_url')}"
+    if _reranker["model"] != cache_key:
         with _chat_lock:
-            if _reranker["model"] != model:
-                print(f"[chat] loading reranker: {model} ...", flush=True)
+            if _reranker["model"] != cache_key:
+                print(f"[chat] loading reranker: {model} (backend={backend}) ...", flush=True)
                 try:
-                    from sentence_transformers import CrossEncoder
-                    _reranker["model"] = model
-                    _reranker["obj"] = CrossEncoder(
-                        model, device=resolve_device(cfg.get("embed_device")))
+                    from _paths import build_reranker
+                    _reranker["model"] = cache_key
+                    _reranker["obj"] = build_reranker(cfg)
                 except Exception as e:
                     print(f"[chat] reranker load failed, reranking disabled: {e}")
-                    _reranker["model"] = model
+                    _reranker["model"] = cache_key
                     _reranker["obj"] = None
     return _reranker["obj"]
 
