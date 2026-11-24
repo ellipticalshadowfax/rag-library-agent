@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """ingest.py - Incremental RAG indexing with fiction-aware metadata."""
 
+import contextlib
 import hashlib
 import json
 import os
@@ -24,7 +25,7 @@ console = Console()
 
 from agent import tokenize
 
-from _paths import load_config_file, ocr_cache_name, rag_root, resolve_device
+from _paths import embedder_identity, load_config_file, ocr_cache_name, rag_root, resolve_device
 
 EXTENSIONS_TEXT = {".pdf", ".epub", ".mobi", ".djvu", ".txt", ".html", ".htm"}
 
@@ -368,7 +369,10 @@ class Manifest:
 
     def write_bm25_tokens(self, doc_id: str, tokens: list[str],
                           set_name: str = ""):
-        """Write token term-frequencies for a single document and update bm25_df."""
+        """Write token term-frequencies for a single document.
+
+        Does NOT touch bm25_df: callers must run ``rebuild_bm25_df`` once after
+        a batch of writes (per-call df updates made ingest quadratic)."""
         from collections import Counter
         counts = Counter(tokens)
         rows = [(doc_id, tok, tf, set_name) for tok, tf in counts.items()]
@@ -377,21 +381,6 @@ class Manifest:
             "VALUES (?, ?, ?, ?)",
             rows,
         )
-        # Rebuild df for affected tokens
-        affected = list(counts.keys())
-        if affected:
-            placeholders = ",".join("?" * len(affected))
-            rows_df = self.conn.execute(
-                f"SELECT token, COUNT(DISTINCT doc_id) AS df "
-                f"FROM bm25_tokens WHERE token IN ({placeholders}) AND set_name = ?",
-                affected + [set_name],
-            ).fetchall()
-            for tok, df in rows_df:
-                self.conn.execute(
-                    "INSERT OR REPLACE INTO bm25_df (token, set_name, doc_freq) "
-                    "VALUES (?, ?, ?)",
-                    (tok, set_name, df),
-                )
 
     def rebuild_bm25_df(self, set_name: str = ""):
         """Full rebuild of the document-frequency table for a set."""
@@ -428,6 +417,12 @@ class Manifest:
             rows,
         )
         self.rebuild_bm25_df(set_name)
+        self.conn.commit()
+
+    def clear_set(self, set_name: str):
+        """Drop every manifest row of a set (files, parents, BM25 postings, df)."""
+        for table in ("files", "parents", "bm25_tokens", "bm25_df"):
+            self.conn.execute(f"DELETE FROM {table} WHERE set_name = ?", (set_name,))
         self.conn.commit()
 
     def remove_parents(self, rel_path: str, set_name: str = ""):
@@ -470,6 +465,57 @@ def _chunk_ids_for_source(collection, rel: str) -> list:
             return list(got.get("ids") or [])
         except Exception:
             return []
+
+
+_ID_KEYS = ("backend", "model", "dim", "query_prefix", "passage_prefix")
+
+
+def _identity_meta(ident: dict) -> dict:
+    """Embedder identity as Chroma collection metadata (rag_embed_* keys)."""
+    return {f"rag_embed_{k}": ident[k] for k in _ID_KEYS if ident.get(k) is not None}
+
+
+def _stored_identity(collection) -> dict:
+    """Identity recorded on a collection ({} for a legacy/unstamped one)."""
+    md = collection.metadata or {}
+    return {k: md[f"rag_embed_{k}"] for k in _ID_KEYS if f"rag_embed_{k}" in md}
+
+
+def _identity_diffs(stored: dict, current: dict) -> list:
+    """[(field, stored, current)] for fields that differ (dim compared as int)."""
+    diffs = []
+    for k in _ID_KEYS:
+        if k not in stored:
+            continue
+        a, b = stored[k], current.get(k)
+        if k == "dim":
+            try:
+                a, b = int(a), int(b)
+            except (TypeError, ValueError):
+                pass
+        if a != b:
+            diffs.append((k, stored[k], current.get(k)))
+    return diffs
+
+
+def _stamp_identity(collection, ident: dict):
+    """Write the identity into the collection metadata. Chroma's modify() rejects
+    metadata containing ``hnsw:space`` (the distance is fixed at creation and
+    kept), so that key is dropped and the other existing keys are merged."""
+    md = {k: v for k, v in (collection.metadata or {}).items() if k != "hnsw:space"}
+    md.update(_identity_meta(ident))
+    collection.modify(metadata=md)
+
+
+def _purge_file(collection, manifest, rel: str, set_name: str, keep_ids=()):
+    """Remove a file's chunks (except ``keep_ids``), BM25 postings and parents."""
+    old_ids = _chunk_ids_for_source(collection, rel)
+    stale = [c for c in old_ids if c not in set(keep_ids)]
+    if stale:
+        collection.delete(ids=stale)
+    for cid in old_ids:
+        manifest.remove_bm25_tokens(cid, set_name)
+    manifest.remove_parents(rel, set_name)
 
 # ─── Calibre Metadata ────────────────────────────────────────────────────────
 
@@ -523,6 +569,43 @@ def load_calibre_tags(db_path: Path) -> dict[str, dict]:
         conn.close()
     except Exception as e:
         console.print(f"[yellow]Warning: Calibre DB read failed: {e}[/yellow]")
+    return meta
+
+
+def load_csv_metadata(csv_path: Path) -> dict[str, dict]:
+    """Optional sidecar metadata source: a flat CSV keyed by filename.
+
+    Generic equivalent of load_calibre_tags/load_opf_metadata for libraries
+    that ship a manifest instead of a Calibre DB or per-folder .opf files
+    (e.g. a document vendor's own catalog export). Enabled via the
+    ``metadata_csv`` config key (path to the CSV, relative to the target or
+    absolute). Recognised columns (all optional beyond ``filename``):
+    ``title``, ``designation`` (a short citable id, e.g. "FM 4-20.198"),
+    ``branch``, ``pub_type``. Rows whose filename isn't found under the
+    ingest target are silently ignored — a manifest that outlives dupe
+    cleanup on disk should not break ingest.
+    """
+    import csv as _csv
+
+    meta: dict[str, dict] = {}
+    try:
+        with open(csv_path, newline="", encoding="utf-8", errors="replace") as f:
+            reader = _csv.DictReader(f)
+            for row in reader:
+                fname = (row.get("filename") or "").strip()
+                if not fname:
+                    continue
+                title = (row.get("title") or "").strip()
+                designation = (row.get("designation") or "").strip()
+                full_title = f"{designation} - {title}" if designation and title else (title or designation)
+                meta[fname] = {
+                    "title": full_title or None,
+                    "designation": designation,
+                    "branch": (row.get("branch") or "").strip(),
+                    "pub_type": (row.get("pub_type") or "").strip(),
+                }
+    except Exception as e:
+        console.print(f"[yellow]Warning: metadata_csv read failed ({csv_path}): {e}[/yellow]")
     return meta
 
 
@@ -1136,7 +1219,8 @@ def build_parent_text(body: str, parent_tokens: int = 1200) -> str:
 
 # ─── Main Ingestion ──────────────────────────────────────────────────────────
 
-def ingest(target: str, set_name: str, cfg: dict, force: bool = False, only_path: str = None):
+def ingest(target: str, set_name: str, cfg: dict, force: bool = False, only_path: str = None,
+           rebuild: bool = False):
     target_path = Path(target)
     if not target_path.is_dir():
         console.print(f"[red]Error: {target} is not a directory[/red]")
@@ -1167,6 +1251,7 @@ def ingest(target: str, set_name: str, cfg: dict, force: bool = False, only_path
     ocr_enabled = cfg.get("ocr_enabled", False)
     ocr_merge = cfg.get("ocr_merge", True)
     batch_size = int(cfg.get("ingest_batch_size", INGEST_BATCH_SIZE))
+    embed_batch_size = int(cfg.get("embed_batch_size", 32))
     exclude = cfg.get("exclude", [])
 
     if ocr_enabled:
@@ -1180,6 +1265,19 @@ def ingest(target: str, set_name: str, cfg: dict, force: bool = False, only_path
     if cal_db:
         console.print(f"[dim]Calibre DB: {cal_db}[/dim]")
         cal_tags = load_calibre_tags(cal_db)
+
+    # Optional CSV sidecar metadata (vendor manifest instead of Calibre/.opf)
+    csv_meta_path = cfg.get("metadata_csv")
+    csv_meta = {}
+    if csv_meta_path:
+        csv_meta_path = Path(csv_meta_path)
+        if not csv_meta_path.is_absolute():
+            csv_meta_path = target_path / csv_meta_path
+        if csv_meta_path.exists():
+            console.print(f"[dim]Metadata CSV: {csv_meta_path}[/dim]")
+            csv_meta = load_csv_metadata(csv_meta_path)
+        else:
+            console.print(f"[yellow]metadata_csv configured but not found: {csv_meta_path}[/yellow]")
 
     # Load manifest
     manifest = Manifest(rag_root_ / "manifest.db")
@@ -1196,23 +1294,63 @@ def ingest(target: str, set_name: str, cfg: dict, force: bool = False, only_path
             f"paths are still skipped.[/yellow]")
     manifest.set_meta(target_key, str(target_path))
 
-    # Load ChromaDB
+    # Load ChromaDB (the collection is opened below, once the embedder is up,
+    # so a failed embedder load can never follow a --rebuild drop).
     client = chromadb.PersistentClient(path=str(index_dir))
+
+    # Initialize embedder (local sentence-transformers, or a remote Ollama
+    # backend when embed_backend=="ollama" — see _paths.build_embedder).
+    embed_backend = (cfg.get("embed_backend") or "local").strip().lower()
+    console.print(f"[dim]Loading embedding model: {embed_model} (backend={embed_backend})...[/dim]")
+    from _paths import build_embedder
+    local_backend = embed_backend == "local"
+    if local_backend:
+        resolve_device(cfg.get("embed_device"))
+        torch.set_num_threads(os.cpu_count() or 8)
+    embedder = build_embedder(cfg)
+    if hasattr(embedder, "prompts") and "passage" not in embedder.prompts:
+        embedder.prompts.update({"passage": "passage: ", "query": "query: "})
+    threads = f", threads={torch.get_num_threads()}" if local_backend else ""
+    console.print(f"[dim]Embedder ready (dim={embedder.get_sentence_embedding_dimension()}"
+                  f"{threads})[/dim]")
+
+    # The embedder identity is recorded on the collection so a later ingest with
+    # a different model/backend/dim/prefixes is refused instead of silently
+    # mixing vector spaces (or failing every upsert).
+    identity = embedder_identity(cfg, embedder)
+    try:
+        identity["dim"] = int(embedder.get_sentence_embedding_dimension())
+    except Exception:
+        pass
+    if rebuild:
+        try:
+            client.delete_collection(set_name)
+        except Exception:
+            pass
+        manifest.clear_set(set_name)
+        force = True
+        console.print(f"[yellow]--rebuild: dropped collection '{set_name}' and its "
+                      f"manifest/BM25/parent rows.[/yellow]")
     collection = client.get_or_create_collection(
         name=set_name,
         metadata={"hnsw:space": "cosine"}
     )
-
-    # Initialize embedder
-    console.print(f"[dim]Loading embedding model: {embed_model}...[/dim]")
-    from sentence_transformers import SentenceTransformer
-    dev = resolve_device(cfg.get("embed_device"))
-    torch.set_num_threads(os.cpu_count() or 8)
-    embedder = SentenceTransformer(embed_model, device=dev)
-    if hasattr(embedder, "prompts") and "passage" not in embedder.prompts:
-        embedder.prompts.update({"passage": "passage: ", "query": "query: "})
-    console.print(f"[dim]Embedder ready (dim={embedder.get_sentence_embedding_dimension()}, "
-                  f"threads={torch.get_num_threads()})[/dim]")
+    stored_identity = _stored_identity(collection)
+    diffs = _identity_diffs(stored_identity, identity) if stored_identity else []
+    if diffs:
+        console.print(f"[red]Refusing to ingest '{set_name}': the collection was built "
+                      f"with a different embedder.[/red]")
+        for k, old, new in diffs:
+            console.print(f"[red]  {k}: indexed with {old!r}, now {new!r}[/red]")
+        console.print("[red]Revert the embed_* settings, or re-run with --rebuild to drop "
+                      "and re-embed this set from scratch.[/red]")
+        manifest.close()
+        sys.exit(1)
+    if not stored_identity and collection.count() > 0:
+        console.print(f"[yellow]Warning: '{set_name}' has {collection.count()} chunks but no "
+                      f"recorded embedder identity (built by an unknown, earlier embedder); "
+                      f"adopting the current one. Use --rebuild if results look wrong.[/yellow]")
+    identity_stamped = bool(stored_identity) and not diffs
 
     # Collect files
     files_to_process = []
@@ -1242,9 +1380,11 @@ def ingest(target: str, set_name: str, cfg: dict, force: bool = False, only_path
 
             # Get metadata
             cal_meta = cal_tags.get(fname, {})
-            title = cal_meta.get("title", fpath.stem)
+            csv_row = csv_meta.get(fname, {})
+            title = cal_meta.get("title") or csv_row.get("title") or fpath.stem
             tags = cal_meta.get("tags", [])
             kind = classify_kind(tags, fiction_tags)
+            designation = csv_row.get("designation", "")
 
             # Check OCR
             ocr_status = "none"
@@ -1271,6 +1411,7 @@ def ingest(target: str, set_name: str, cfg: dict, force: bool = False, only_path
                 "mtime": mtime,
                 "size": size,
                 "title": title,
+                "designation": designation,
                 "tags": tags,
                 "kind": kind,
                 "ocr_status": ocr_status,
@@ -1331,139 +1472,133 @@ def ingest(target: str, set_name: str, cfg: dict, force: bool = False, only_path
     total = len(files_to_process)
     start_time = time.time()
 
-    for idx, finfo in enumerate(files_to_process, start=1):
-        rel = finfo["path"]
-        fpath = Path(finfo["full_path"])
-        ext = finfo["ext"]
+    try:
+        for idx, finfo in enumerate(files_to_process, start=1):
+            rel = finfo["path"]
+            fpath = Path(finfo["full_path"])
+            ext = finfo["ext"]
 
-        try:
-            # OCR if needed
-            if finfo["ocr_status"] == "needed":
-                ocr_out = ocr_cache / ocr_cache_name(fpath)
-                if not ocr_out.exists():
-                    print(f"[{idx}/{total}] OCR: {fpath.name}", flush=True)
-                    ocr_pdf_auto(str(fpath), str(ocr_out), cfg.get("ocr_languages", ["en"]),
-                                 cfg.get("ocr_backend", "tesseract"))
-                    finfo["ocr_status"] = "done"
-                else:
-                    finfo["ocr_status"] = "cached"
-                # Auto write-back: merge the OCR text into the original PDF so it
-                # becomes searchable/extractable without an OCR re-run next time.
-                # Only merge while the cache is newer than the PDF (i.e. the text
-                # layer isn't already applied), then refresh the recorded stat so
-                # the merged file is seen as current next run instead of being
-                # reprocessed (the in-place save changes its mtime/size).
-                if ocr_merge:
-                    try:
-                        cache_newer = ocr_out.stat().st_mtime >= fpath.stat().st_mtime
-                    except OSError:
-                        cache_newer = False
-                    if cache_newer:
-                        merged = merge_text_into_pdf(str(fpath), str(ocr_out))
-                        if merged:
-                            st = fpath.stat()
-                            finfo["mtime"], finfo["size"] = st.st_mtime, st.st_size
-                        print(f"[{idx}/{total}] {'merged' if merged else 'merge-failed'} OCR into {fpath.name}", flush=True)
-                    else:
-                        print(f"[{idx}/{total}] skip merge (OCR text already embedded) {fpath.name}", flush=True)
-
-            # Extract text
-            text, text_meta = extract_text(fpath, ext, ocr_cache)
-            if not text.strip():
-                print(f"[{idx}/{total}] SKIP (no text): {fpath.name}", flush=True)
-                manifest.upsert(rel, str(fpath), finfo["mtime"], finfo["size"],
-                               finfo["ocr_status"], finfo["kind"], finfo["tags"], finfo["title"], set_name,
-                               content_hash=_digest_if_unchanged(fpath, finfo["mtime"], finfo["size"]))
-                skipped += 1
-                continue
-
-            # Early, cheap estimate (chars / ~4 chars per token / chunk_tokens) so a
-            # huge file is flagged before the chunk/embed pass spends time on it.
-            est_chunks = max(1, len(text) // max(1, chunk_tokens * 4))
-            if est_chunks > MAX_CHUNKS_PER_FILE:
-                console.print(f"[yellow][{idx}/{total}] Big file detected: {fpath.name} "
-                              f"(~{est_chunks} chunks) - will process in batches[/yellow]")
-
-            # Chunk. "flat" keeps the original word-count splitter (and chunk
-            # IDs) byte-for-byte; "parent_child" uses the boundary-aware
-            # recursive splitter and carries section metadata on each chunk.
-            if chunking_strategy == "parent_child":
-                chunked = chunk_text_recursive(text, chunk_tokens, chunk_overlap,
-                                               sections=text_meta.get("sections"))
-                chunks = [c["text"] for c in chunked]
-            else:
-                chunked = None
-                chunks = chunk_text(text, chunk_tokens, chunk_overlap)
-            if not chunks:
-                print(f"[{idx}/{total}] SKIP (no chunks): {fpath.name}", flush=True)
-                skipped += 1
-                continue
-
-            # Parent chunks (parent_child only): one parent per normalized
-            # section ordinal, deterministic id shared with the child metadata.
-            parent_rows = []
-            if chunked is not None:
-                norm_secs = {s["ordinal"]: s for s in
-                             _normalize_sections(text_meta.get("sections"), len(text))}
-                for o in sorted({c["section_ordinal"] for c in chunked}):
-                    sec = norm_secs.get(o)
-                    body = text[sec["start_char"]:sec["end_char"]] if sec else ""
-                    parent_rows.append({
-                        "parent_id": hashlib.sha256(
-                            f"{rel}:section{o}".encode()).hexdigest()[:16],
-                        "set_name": set_name,
-                        "source": rel,
-                        "title": finfo["title"],
-                        "section_title": sec["title"] if sec else "",
-                        "section_ordinal": o,
-                        "text": build_parent_text(body, parent_tokens),
-                    })
-
-            # Oversized single file (e.g. complete-works omnibus): handled below by
-            # processing across multiple embed/upsert batches instead of skipping.
-            if len(chunks) > MAX_CHUNKS_PER_FILE:
-                print(f"[{idx}/{total}] BIG: {fpath.name} ({len(chunks)} chunks) - "
-                      f"processing in batches of {batch_size}", flush=True)
-
-            # Drop any chunks previously stored for this file (deterministic ids
-            # re-upsert in place, but a changed chunking/strategy can change the
-            # chunk count, so stale tail chunks must be removed first). Capture
-            # the old chunk ids first so their BM25 postings go too.
-            old_chunk_ids = _chunk_ids_for_source(collection, rel)
             try:
-                collection.delete(where={"source": rel})
-            except Exception as e:
-                print(f"[{idx}/{total}] WARN delete-stale failed for {fpath.name}: {e}",
-                      flush=True)
-            for cid in old_chunk_ids:
-                manifest.remove_bm25_tokens(cid, set_name)
+                # OCR if needed
+                if finfo["ocr_status"] == "needed":
+                    ocr_out = ocr_cache / ocr_cache_name(fpath)
+                    if not ocr_out.exists():
+                        print(f"[{idx}/{total}] OCR: {fpath.name}", flush=True)
+                        ocr_pdf_auto(str(fpath), str(ocr_out), cfg.get("ocr_languages", ["en"]),
+                                     cfg.get("ocr_backend", "tesseract"))
+                        finfo["ocr_status"] = "done"
+                    else:
+                        finfo["ocr_status"] = "cached"
+                    # Auto write-back: merge the OCR text into the original PDF so it
+                    # becomes searchable/extractable without an OCR re-run next time.
+                    # Only merge while the cache is newer than the PDF (i.e. the text
+                    # layer isn't already applied), then refresh the recorded stat so
+                    # the merged file is seen as current next run instead of being
+                    # reprocessed (the in-place save changes its mtime/size).
+                    if ocr_merge:
+                        try:
+                            cache_newer = ocr_out.stat().st_mtime >= fpath.stat().st_mtime
+                        except OSError:
+                            cache_newer = False
+                        if cache_newer:
+                            merged = merge_text_into_pdf(str(fpath), str(ocr_out))
+                            if merged:
+                                st = fpath.stat()
+                                finfo["mtime"], finfo["size"] = st.st_mtime, st.st_size
+                            print(f"[{idx}/{total}] {'merged' if merged else 'merge-failed'} OCR into {fpath.name}", flush=True)
+                        else:
+                            print(f"[{idx}/{total}] skip merge (OCR text already embedded) {fpath.name}", flush=True)
 
-            # Embed + upsert in batches. Chroma has a hard per-call limit (~5461), so
-            # any file - including huge omnibuses - is processed across multiple calls
-            # instead of a single one. Chunk IDs stay deterministic (rel:index).
-            # Also write BM25 token data for persistent lexical index.
-            if chunked is not None:
-                manifest.remove_parents(rel, set_name)
-            for start in range(0, len(chunks), batch_size):
-                batch = chunks[start:start + batch_size]
-                with torch.no_grad():
-                    embeddings = embedder.encode(batch, show_progress_bar=False,
-                                                 convert_to_numpy=True,
-                                                 prompt_name="passage").tolist()
+                # Extract text
+                text, text_meta = extract_text(fpath, ext, ocr_cache)
+                if not text.strip():
+                    print(f"[{idx}/{total}] SKIP (no text): {fpath.name}", flush=True)
+                    # A file that used to have text must not keep stale results.
+                    _purge_file(collection, manifest, rel, set_name)
+                    manifest.upsert(rel, str(fpath), finfo["mtime"], finfo["size"],
+                                   finfo["ocr_status"], finfo["kind"], finfo["tags"], finfo["title"], set_name,
+                                   content_hash=_digest_if_unchanged(fpath, finfo["mtime"], finfo["size"]))
+                    skipped += 1
+                    continue
 
+                # Early, cheap estimate (chars / ~4 chars per token / chunk_tokens) so a
+                # huge file is flagged before the chunk/embed pass spends time on it.
+                est_chunks = max(1, len(text) // max(1, chunk_tokens * 4))
+                if est_chunks > MAX_CHUNKS_PER_FILE:
+                    console.print(f"[yellow][{idx}/{total}] Big file detected: {fpath.name} "
+                                  f"(~{est_chunks} chunks) - will process in batches[/yellow]")
+
+                # Chunk. "flat" keeps the original word-count splitter (and chunk
+                # IDs) byte-for-byte; "parent_child" uses the boundary-aware
+                # recursive splitter and carries section metadata on each chunk.
+                if chunking_strategy == "parent_child":
+                    chunked = chunk_text_recursive(text, chunk_tokens, chunk_overlap,
+                                                   sections=text_meta.get("sections"))
+                    chunks = [c["text"] for c in chunked]
+                else:
+                    chunked = None
+                    chunks = chunk_text(text, chunk_tokens, chunk_overlap)
+                if not chunks:
+                    print(f"[{idx}/{total}] SKIP (no chunks): {fpath.name}", flush=True)
+                    _purge_file(collection, manifest, rel, set_name)
+                    manifest.upsert(rel, str(fpath), finfo["mtime"], finfo["size"],
+                                   finfo["ocr_status"], finfo["kind"], finfo["tags"], finfo["title"], set_name,
+                                   content_hash=_digest_if_unchanged(fpath, finfo["mtime"], finfo["size"]))
+                    skipped += 1
+                    continue
+
+                # Parent chunks (parent_child only): one parent per normalized
+                # section ordinal, deterministic id shared with the child metadata.
+                parent_rows = []
+                if chunked is not None:
+                    norm_secs = {s["ordinal"]: s for s in
+                                 _normalize_sections(text_meta.get("sections"), len(text))}
+                    for o in sorted({c["section_ordinal"] for c in chunked}):
+                        sec = norm_secs.get(o)
+                        body = text[sec["start_char"]:sec["end_char"]] if sec else ""
+                        parent_rows.append({
+                            "parent_id": hashlib.sha256(
+                                f"{rel}:section{o}".encode()).hexdigest()[:16],
+                            "set_name": set_name,
+                            "source": rel,
+                            "title": finfo["title"],
+                            "section_title": sec["title"] if sec else "",
+                            "section_ordinal": o,
+                            "text": build_parent_text(body, parent_tokens),
+                        })
+
+                # Oversized single file (e.g. complete-works omnibus): handled below by
+                # processing across multiple embed/upsert batches instead of skipping.
+                if len(chunks) > MAX_CHUNKS_PER_FILE:
+                    print(f"[{idx}/{total}] BIG: {fpath.name} ({len(chunks)} chunks) - "
+                          f"processing in batches of {batch_size}", flush=True)
+
+                # Embed EVERYTHING first (all batches, in memory as float arrays). If the embedder is
+                # down or returns the wrong shape, nothing has been deleted yet, so
+                # the file's previously indexed chunks stay intact.
+                no_grad = torch.no_grad() if local_backend else contextlib.nullcontext()
                 all_ids = []
-                all_docs = []
-                all_embeddings = []
+                emb_batches = []
+                for start in range(0, len(chunks), batch_size):
+                    batch = chunks[start:start + batch_size]
+                    with no_grad:
+                        embeddings = embedder.encode(batch, show_progress_bar=False,
+                                                     convert_to_numpy=True,
+                                                     batch_size=embed_batch_size,
+                                                     prompt_name="passage")
+                    if len(embeddings) != len(batch):
+                        raise RuntimeError(f"embedder returned {len(embeddings)} vectors "
+                                           f"for {len(batch)} chunks")
+                    emb_batches.append(embeddings)
+                for abs_index in range(len(chunks)):
+                    all_ids.append(hashlib.sha256(f"{rel}:{abs_index}".encode()).hexdigest()[:16])
+
                 all_metadatas = []
-                for j, (chunk, emb) in enumerate(zip(batch, embeddings)):
-                    abs_index = start + j
-                    chunk_id = hashlib.sha256(f"{rel}:{abs_index}".encode()).hexdigest()[:16]
-                    all_ids.append(chunk_id)
-                    all_docs.append(chunk)
-                    all_embeddings.append(emb)
+                for abs_index in range(len(chunks)):
                     metadata = {
                         "source": rel,
                         "title": finfo["title"],
+                        "designation": finfo.get("designation", ""),
                         "kind": finfo["kind"],
                         "tags": json.dumps(finfo["tags"]),
                         "set": set_name,
@@ -1471,8 +1606,6 @@ def ingest(target: str, set_name: str, cfg: dict, force: bool = False, only_path
                         "total_chunks": len(chunks),
                     }
                     if chunked is not None:
-                        # Deterministic parent placeholder (real parents store
-                        # lands in Session 5): section-level id, same scheme.
                         ci = chunked[abs_index]
                         metadata["section_title"] = ci["section_title"]
                         metadata["section_ordinal"] = ci["section_ordinal"]
@@ -1481,45 +1614,57 @@ def ingest(target: str, set_name: str, cfg: dict, force: bool = False, only_path
                         ).hexdigest()[:16]
                     all_metadatas.append(metadata)
 
-                collection.upsert(
-                    ids=all_ids,
-                    documents=all_docs,
-                    embeddings=all_embeddings,
-                    metadatas=all_metadatas,
-                )
-
-                for cid, chunk_text_str in zip(all_ids, all_docs):
+                # Upsert in batches (Chroma has a hard per-call limit ~5461; ids are
+                # deterministic rel:index so they overwrite in place). Only after
+                # every batch landed are the stale tail chunks (a changed chunk
+                # count), old BM25 postings and old parents dropped.
+                for k, start in enumerate(range(0, len(chunks), batch_size)):
+                    end = start + batch_size
+                    collection.upsert(
+                        ids=all_ids[start:end],
+                        documents=chunks[start:end],
+                        embeddings=emb_batches[k],
+                        metadatas=all_metadatas[start:end],
+                    )
+                if not identity_stamped:
+                    _stamp_identity(collection, identity)
+                    identity_stamped = True
+                _purge_file(collection, manifest, rel, set_name, keep_ids=all_ids)
+                for cid, chunk_text_str in zip(all_ids, chunks):
                     manifest.write_bm25_tokens(cid, tokenize(chunk_text_str), set_name)
 
-            manifest.rebuild_bm25_df(set_name)
+                # Persist parents only after the child embed/upsert succeeded, so a
+                # failed file never leaves parents without children.
+                if parent_rows:
+                    manifest.write_parents(parent_rows)
 
-            # Persist parents only after the child embed/upsert succeeded, so a
-            # failed file never leaves parents without children.
-            if parent_rows:
-                manifest.write_parents(parent_rows)
+                # Update manifest
+                # Hash the bytes as they are now (after any OCR merge), so the
+                # stored digest matches the post-merge file.
+                manifest.upsert(rel, str(fpath), finfo["mtime"], finfo["size"],
+                               finfo["ocr_status"], finfo["kind"], finfo["tags"], finfo["title"], set_name,
+                               content_hash=_digest_if_unchanged(fpath, finfo["mtime"], finfo["size"]))
+                processed += 1
 
-            # Update manifest
-            # Hash the bytes as they are now (after any OCR merge), so the
-            # stored digest matches the post-merge file.
-            manifest.upsert(rel, str(fpath), finfo["mtime"], finfo["size"],
-                           finfo["ocr_status"], finfo["kind"], finfo["tags"], finfo["title"], set_name,
-                           content_hash=_digest_if_unchanged(fpath, finfo["mtime"], finfo["size"]))
-            processed += 1
+            except Exception as e:
+                print(f"[{idx}/{total}] ERROR {rel}: {e}", flush=True)
+                errors += 1
 
-        except Exception as e:
-            print(f"[{idx}/{total}] ERROR {rel}: {e}", flush=True)
-            errors += 1
-
-        # Status line every file
-        elapsed = time.time() - start_time
-        rate = idx / elapsed if elapsed > 0 else 0
-        if rate > 0:
-            eta = (total - idx) / rate
-            eta_s = f"eta={int(eta//60)}m{int(eta%60)}s"
-        else:
-            eta_s = "eta=?" 
-        print(f"[{idx}/{total}] done={processed} skip={skipped} err={errors} " 
-              f"elapsed={int(elapsed//60)}m{int(elapsed%60)}s {eta_s}", flush=True)
+            # Status line every file
+            elapsed = time.time() - start_time
+            rate = idx / elapsed if elapsed > 0 else 0
+            if rate > 0:
+                eta = (total - idx) / rate
+                eta_s = f"eta={int(eta//60)}m{int(eta%60)}s"
+            else:
+                eta_s = "eta=?" 
+            print(f"[{idx}/{total}] done={processed} skip={skipped} err={errors} " 
+                  f"elapsed={int(elapsed//60)}m{int(elapsed%60)}s {eta_s}", flush=True)
+    finally:
+        # One df rebuild per run (not per file); in a finally so a stop/SIGTERM
+        # mid-run still leaves bm25_df consistent with bm25_tokens.
+        manifest.rebuild_bm25_df(set_name)
+        manifest.commit()
 
     manifest.close()
 
@@ -1604,6 +1749,11 @@ def main():
     parser.add_argument("--set", default="library", help="Collection/set name")
     parser.add_argument("--force", action="store_true", help="Reprocess all files")
     parser.add_argument("--only", help="Only process files matching this path substring")
+    parser.add_argument("--rebuild", action="store_true",
+                        help="Drop the --set collection plus its manifest file rows, "
+                             "parents and BM25 rows, then ingest fresh with the "
+                             "current embedder (needed after changing embed model/"
+                             "backend/prefixes).")
     parser.add_argument("--rebuild-bm25", action="store_true",
                         help="Rebuild the persistent BM25 posting tables for the "
                              "given --set from all its Chroma chunks (repairs a "
@@ -1627,7 +1777,8 @@ def main():
         sys.exit(1)
 
     try:
-        ingest(target, args.set, cfg, force=args.force, only_path=args.only)
+        ingest(target, args.set, cfg, force=args.force, only_path=args.only,
+               rebuild=args.rebuild)
     finally:
         release_ingest_lock()
 
